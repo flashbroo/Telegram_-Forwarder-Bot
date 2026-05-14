@@ -1,0 +1,18 @@
+[Unit]
+Description=Telegram Forwarder Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/telegram-forwarder-bot
+EnvironmentFile=/opt/telegram-forwarder-bot/.env
+ExecStart=/opt/telegram-forwarder-bot/.venv/bin/python /opt/telegram-forwarder-bot/bot.py
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

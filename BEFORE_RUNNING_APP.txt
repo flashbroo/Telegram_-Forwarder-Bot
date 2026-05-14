@@ -1,0 +1,402 @@
+CODE AND EVERYTHING IS CODE BUT JUST ADD PAYMENT MODE WHICH IS SHOWN BELOW AND DEPLOMENT PROCESS TO MAKEE IT ONLY IN README.md 
+
+Ⓕⓛⓐⓢⓗ ⚡, [21-11-2025 16:07]
+Great — I’ll implement Option A (Telegram Native Payments using Razorpay) and explain how to support UPI payments in India. I’ll give you the exact code you must add/replace, where to put it, how to configure BotFather/Razorpay, and how to test. This will make /buy <plan_key> work inside Telegram (private chat) and activate subscriptions in your DB.
+
+I won’t change unrelated files — I’ll supply a robust payments_telegram.py (ready-to-drop-in) and the exact bot.py handler lines you must have. I’ll also show the config.py fields that must be set, and a step-by-step checklist for BotFather/Razorpay/UPI.
+
+
+---
+
+Summary — what I'll deliver right now
+
+1. A complete, tested-ready payments_telegram.py (async, uses your DB helpers).
+
+
+2. Exact lines to add to bot.py (handler registration).
+
+
+3. config.py entries you must set (provider token + INR notes).
+
+
+4. Step-by-step setup for Razorpay + BotFather to enable UPI.
+
+
+5. How to test /buy and common troubleshooting.
+
+
+
+
+---
+
+1) Replace / add file: payments_telegram.py
+
+Create or replace your existing payments_telegram.py with this file. It uses your DB helpers (db.execute) and subscriptions.activate_subscription to mark users active after successful payment.
+
+# payments_telegram.py
+import logging
+from telegram import LabeledPrice, Update
+from telegram.ext import ContextTypes
+from db import execute
+from utils import now_iso
+import config
+import subscriptions
+
+logger = logging.getLogger(name)
+
+async def cmd_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Usage: /buy <plan_key>
+    Must be called in a private chat with the bot (Telegram requires invoices in private chats or supported contexts).
+    """
+    # Ensure command used with an argument
+    if len(context.args) != 1:
+        await update.message.reply_text("Usage: /buy <plan_key>\nExample: /buy premium")
+        return
+
+    plan_key = context.args[0].strip()
+    plan = config.PLANS.get(plan_key)
+    if not plan:
+        await update.message.reply_text(f"Plan {plan_key} not found. Use /list_plans to see available plans.")
+        return
+
+    # Check provider token exists
+    provider_token = getattr(config, "TELEGRAM_PROVIDER_TOKEN", "") or ""
+    if not provider_token:
+        await update.message.reply_text("⚠️ Payments are not configured. Contact the admin.")
+        return
+
+    # Telegram Payments expects amount in the smallest unit (paise for INR)
+    try:
+        amount_smallest = int(round(float(plan.get("price", 0.0)) * 100))
+    except Exception:
+        await update.message.reply_text("Plan price is invalid on server. Contact admin.")
+        return
+
+    title = plan.get("name", plan_key)
+    description = plan.get("features", "")
+    payload = f"buy_plan_{plan_key}_{update.effective_user.id}"
+
+    # LabeledPrice expects amount in the smallest currency unit (e.g. paise)
+    prices = [LabeledPrice(label=title, amount=amount_smallest)]
+
+    try:
+        await context.bot.send_invoice(
+            chat_id=update.effective_chat.id,
+            title=title,
+            description=description,
+            payload=payload,
+            provider_token=provider_token,
+            currency=plan.get("currency", config.DEFAULT_CURRENCY),
+            prices=prices,
+            start_parameter=f"subscribe-{plan_key}"
+        )
+    except Exception as e:
+        logger.exception("Failed to send invoice")
+        await update.message.reply_text(f"Failed to create invoice: {e}")
+
+async def precheckout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Must answer pre-checkout query.
+    """
+    query = update.pre_checkout_query
+    try:
+        await query.answer(ok=True)
+    except Exception as e:
+        logger.exception("precheckout answer failed")
+        # If we can't answer ok, send failure
+        try:
+            await query.answer(ok=False, error_message="Payment cannot be processed right now.")
+        except Exception:
+            pass
+
+Ⓕⓛⓐⓢⓗ ⚡, [21-11-2025 16:07]
+async def successful_payment_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Called when payment is successful.
+    We record raw payment and activate subscription.
+    """
+    try:
+        msg = update.message
+        user = update.effective_user
+        payment = msg.successful_payment
+        payload = getattr(payment, "invoice_payload", "")  # e.g. buy_plan_premium_<user_id>
+
+        # Save raw payment data
+        execute(
+            "INSERT INTO payments (user_id, provider, payload, status, ts) VALUES (?,?,?,?,?)",
+            (user.id, "telegram", str(payment.to_dict()), "succeeded", now_iso())
+        )
+
+        # Parse plan_key from payload
+        plan_key = None
+        try:
+            parts = payload.split("_")
+            # expected format: buy_plan_<plan_key>_<user_id>
+            if len(parts) >= 3:
+                plan_key = parts[2]
+        except Exception:
+            plan_key = None
+
+        # Activate subscription if we parsed plan_key
+        if plan_key:
+            provider_payment_id = getattr(payment, "provider_payment_charge_id", "") or ""
+            amount = float(payment.total_amount) / 100.0 if getattr(payment, "total_amount", None) is not None else 0.0
+            ok = subscriptions.activate_subscription(user.id, plan_key, "telegram", provider_payment_id, amount)
+            if ok:
+                await update.message.reply_text("🎉 Payment successful — subscription activated. Thank you!")
+            else:
+                await update.message.reply_text("Payment succeeded but subscription activation failed. Contact admin.")
+        else:
+            await update.message.reply_text("Payment received but payload parsing failed. Contact admin.")
+    except Exception as e:
+        logger.exception("Error in successful_payment_handler")
+        try:
+            await update.message.reply_text("An error occurred while processing payment. Contact admin.")
+        except Exception:
+            pass
+
+> Notes about this file:
+
+It expects: config.PLANS and config.TELEGRAM_PROVIDER_TOKEN to be set.
+
+Amounts are converted to paise (price * 100) for INR.
+
+subscriptions.activate_subscription is called when successful payment occurs to mark the user active in your DB.
+
+
+
+
+
+---
+
+2) Ensure these lines appear in bot.py (handler registration)
+
+Add these imports near the top of bot.py:
+
+from payments_telegram import cmd_buy, precheckout_handler, successful_payment_handler
+from telegram.ext import PreCheckoutQueryHandler
+
+And register handlers (where you register other commands):
+
+# payments
+app.add_handler(CommandHandler("buy", cmd_buy))
+# PreCheckoutQueryHandler and successful payment handler:
+app.add_handler(PreCheckoutQueryHandler(precheckout_handler))
+app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_handler))
+
+Important: cmd_buy must be callable in private chat with the bot for payments — Telegram's UI works best in private chat. If users run /buy in a group or channel, instruct them to message the bot privately.
+
+
+---
+
+3) config.py — mandatory fields you must set
+
+Make sure your config.py contains (or update similar variables if you already have them):
+
+# config.py
+BOT_TOKEN = "PUT_YOUR_TELEGRAM_BOT_TOKEN_HERE"
+ADMIN_ID = 123456789  # your id
+DB_PATH = "bot.db"
+DEFAULT_CURRENCY = "INR"
+# Telegram Payments provider token (from BotFather) — required for /buy to work
+TELEGRAM_PROVIDER_TOKEN = "PROVIDER_TOKEN_FROM_BOTFATHER"  # e.g. from BotFather 'setpayment' flow
+
+Important: TELEGRAM_PROVIDER_TOKEN is not your bot token. It is a provider token you obtain when you configure payments for your bot via BotFather. For Razorpay, BotFather will return a provider token string after you register your Razorpay account / credentials with BotFather / Telegram's payments configuration.
+
+
+---
+
+4) How to configure Razorpay + Telegram Payments (UPI enabled)
+
+Follow these steps carefully (high-level):
+
+1. Create a Razorpay account (business account) and complete KYC. Razorpay supports UPI payments.
+
+Ⓕⓛⓐⓢⓗ ⚡, [21-11-2025 16:07]
+2. Get credentials (API key id and secret) from Razorpay dashboard.
+
+
+3. Set up Telegram Payments provider with BotFather:
+
+Open BotFather in Telegram.
+
+Send /mybots, select your bot.
+
+Choose Payments or setdomain / setpayments depending on BotFather UI.
+
+Follow BotFather prompts: give provider name (Razorpay), provide Razorpay API key/secret (or the mechanism BotFather asks).
+
+BotFather will return a provider_token string — copy it.
+
+
+If BotFather asks for merchant details, fill them as prompted. For UPI, Razorpay will enable UPI once your Razorpay account is set up and bank details are added.
+
+
+4. Put that provider_token into config.TELEGRAM_PROVIDER_TOKEN.
+
+
+5. Test in private chat: Payments in Telegram can be tested with real payments on Razorpay test mode (Razorpay provides test credentials) or with real UPI on production credentials.
+
+
+6. Important: Telegram Payments displays UPI as a payment option automatically for INR if your provider supports it. You don't need to set UPI explicitly in your code — Telegram + Razorpay handle payment methods.
+
+
+
+
+---
+
+5) Example PLANS in config.py
+
+Make sure config.PLANS exists and plan keys match what you pass to /buy:
+
+PLANS = {
+    "basic": {"name": "Basic", "price": 49.0, "currency": "INR", "duration_days": 30, "features": "text only, 2 targets"},
+    "premium": {"name": "Premium", "price": 199.0, "currency": "INR", "duration_days": 30, "features": "all media, unlimited targets"}
+}
+
+Use currency "INR" for UPI options.
+
+
+---
+
+6) Testing steps (exact sequence)
+
+1. Edit config.py:
+
+BOT_TOKEN, ADMIN_ID, TELEGRAM_PROVIDER_TOKEN, and PLANS must be present.
+
+
+
+2. Restart your bot (or reload).
+
+
+3. Open a private chat with your bot (important).
+
+
+4. Type:
+
+/buy premium
+
+— or /buy basic depending on your plan keys.
+
+
+5. Telegram should show the invoice UI with price and Pay button. Tap Pay — Razorpay / Telegram will show UPI, cards, etc.
+
+
+6. Complete payment (in Razorpay test mode or production). After successful payment:
+
+Telegram will call successful_payment_handler.
+
+Your DB will get a payments row.
+
+subscriptions.activate_subscription(...) will be called and insert a subscription in DB.
+
+
+
+7. Confirm subscription:
+
+/status
+
+Should show active plan and expiry.
+
+
+
+
+---
+
+7) Troubleshooting / Common errors
+
+No invoice appears / "Payments not configured": TELEGRAM_PROVIDER_TOKEN is empty or incorrect. Re-check BotFather provider setup and paste provider token to config.py. Restart bot.
+
+"invoice send failed" exception: Bot will log exception. Common causes:
+
+Bot not allowed to send invoices in group context — use private chat.
+
+Invalid provider token.
+
+Currency not supported by provider — use "INR" for Razorpay.
+
+
+Payment succeeds but subscription not activated:
+
+Confirm successful_payment_handler is registered and MESSAGE type filters.SUCCESSFUL_PAYMENT is correctly added.
+
+Confirm DB insert for payments succeeded (check payments table).
+
+Check logs for exceptions in successful_payment_handler.
+
+
+UPI option not shown:
+
+Ensure your Razorpay account supports UPI and the provider token corresponds to a Razorpay account with UPI enabled.
+
+Ensure currency is INR and amount is > 1 INR.
+
+
+Amount rounding: Always send integer paise. The code uses int(round(price*100)). Make sure PLANS prices are numeric floats.
+
+
+
+---
+
+8) Security & notes
+
+Never expose your TELEGRAM_PROVIDER_TOKEN publicly.
+
+Test payments first in Razorpay test mode (they provide test UPI/UPI-like flows), then move to production.
+
+Telegram Payments requires that the bot can send invoices in the chat — typically works in private chats. For group purchases, you may need to direct the user to private chat.
+
+
+
+---
+
+9) Optional: allow /buy to redirect from group to private chat
+
+If users type /buy in a group, respond with a short message and a private-chat deep-link:
+
+Ⓕⓛⓐⓢⓗ ⚡, [21-11-2025 16:07]
+# in cmd_buy at top
+if update.effective_chat.type != "private":
+    bot_username = (await context.bot.get_me()).username
+    await update.message.reply_text(
+        f"Please message me privately to purchase: https://t.me/{bot_username}?start=buy_{plan_key}"
+    )
+    return
+
+Then handle /start payload parsing to create invoice when user opens private chat.
+
+
+---
+
+10) Final checklist before you test
+
+[ ] config.TELEGRAM_PROVIDER_TOKEN set (provider token from BotFather)
+
+[ ] config.PLANS has plan keys and numeric prices
+
+[ ] payments_telegram.py is placed and imported in bot.py
+
+[ ] bot.py has handlers registered as shown above
+
+[ ] Bot restarted after changes
+
+[ ] Test in private chat (/buy premium)
+
+[ ] Check DB payments and subscriptions records after successful payment
+
+
+
+---
+
+If you want I can:
+
+Paste a patched bot.py (full file) with handlers already wired (so you can just drop it in), or
+
+Generate a /start deep-link handler that accepts start=buy_<plan_key> to send invoice automatically when user opens private chat, or
+
+Provide a short script to verify DB rows after payment.
+
+
+Which one should I do next? (I recommend: paste patched bot.py so you can drop-and-run immediately.)

@@ -1,0 +1,11 @@
+python-telegram-bot==20.3
+httpx==0.24.1
+httpcore==0.17.1
+pillow
+requests
+schedule
+python-dotenv
+psycopg2-binary
+telethon
+fastapi
+uvicorn
