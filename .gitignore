@@ -1,0 +1,33 @@
+.env
+.env.local
+.venv/
+venv/
+bot-env/
+__pycache__/
+*.py[cod]
+*.log
+
+# Runtime state
+sessions/
+logs/
+forward_logs.txt
+
+# Local databases and temporary files
+bot.db
+bot.db-shm
+bot.db-wal
+smoke_test.db
+smoke_test.db-journal
+smoke_tmp/
+test_session.session
+*.session
+*.session-journal
+
+# Frontend/package manager
+node_modules/
+npm-debug.log*
+package-lock.json
+
+# OS/editor noise
+.DS_Store
+Thumbs.db

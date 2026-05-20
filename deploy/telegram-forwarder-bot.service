@@ -5,14 +5,21 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=ubuntu
-Group=ubuntu
+User=telegrambot
+Group=telegrambot
 WorkingDirectory=/opt/telegram-forwarder-bot
 EnvironmentFile=/opt/telegram-forwarder-bot/.env
+Environment=PYTHONUNBUFFERED=1
 ExecStart=/opt/telegram-forwarder-bot/.venv/bin/python /opt/telegram-forwarder-bot/bot.py
 Restart=always
 RestartSec=5
 TimeoutStopSec=20
+KillSignal=SIGINT
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
