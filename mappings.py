@@ -182,15 +182,59 @@ def _mapping_display(uid, row):
 
 
 def _is_group_or_channel(chat) -> bool:
-    return chat.__class__.__name__.lower() in ("channel", "channelforbidden", "chat", "chatforbidden")
+    return chat.__class__.__name__.lower() in ("channel", "chat")
 
 
 def _is_accessible_source_chat(chat) -> bool:
-    return chat.__class__.__name__.lower() in ("channel", "channelforbidden", "chat", "chatforbidden", "user")
+    return chat.__class__.__name__.lower() in ("channel", "chat", "user")
 
 
-def _has_admin_rights(chat) -> bool:
-    return bool(getattr(chat, "creator", False) or getattr(chat, "admin_rights", None))
+def _is_restricted(rights, permission: str) -> bool:
+    return bool(rights and getattr(rights, permission, False))
+
+
+def _rights_allow_required_content(*rights_objects) -> bool:
+    media_permissions = ("send_media", "send_photos", "send_videos", "send_docs")
+    for rights in rights_objects:
+        if _is_restricted(rights, "send_messages"):
+            return False
+        for permission in media_permissions:
+            if _is_restricted(rights, permission):
+                return False
+    return True
+
+
+def _can_send_required_content(chat, include_default_rights: bool = True) -> bool:
+    rights_objects = [getattr(chat, "banned_rights", None)]
+    if include_default_rights:
+        rights_objects.append(getattr(chat, "default_banned_rights", None))
+
+    return _rights_allow_required_content(*rights_objects)
+
+
+def _can_post_to_target(chat) -> bool:
+    if not _is_group_or_channel(chat):
+        return False
+
+    if getattr(chat, "creator", False):
+        return True
+
+    admin_rights = getattr(chat, "admin_rights", None)
+    if getattr(chat, "broadcast", False):
+        return bool(
+            admin_rights
+            and getattr(admin_rights, "post_messages", False)
+            and _can_send_required_content(chat, include_default_rights=False)
+        )
+
+    if admin_rights:
+        return _can_send_required_content(chat, include_default_rights=False)
+
+    return (
+        not getattr(chat, "left", False)
+        and not getattr(chat, "deactivated", False)
+        and _can_send_required_content(chat, include_default_rights=True)
+    )
 
 
 def filter_dialogs(dialogs, role):
@@ -202,7 +246,7 @@ def filter_dialogs(dialogs, role):
         if role == "source" and not _is_accessible_source_chat(chat):
             continue
 
-        if role == "target" and (not _is_group_or_channel(chat) or not _has_admin_rights(chat)):
+        if role == "target" and not _can_post_to_target(chat):
             continue
 
         key = _extract_channel_key(chat, role)
@@ -216,7 +260,7 @@ def filter_dialogs(dialogs, role):
         else:
             remaining.append(item)
 
-    return pinned + remaining
+    return (pinned + remaining)[:10]
 
 
 def build_buttons(role, selected_ids, pinned, saved):
@@ -266,7 +310,7 @@ async def cmd_add_mapping_flow(update: Update, context: ContextTypes.DEFAULT_TYP
     ])
 
     await message.reply_text(
-        f"Select SOURCE chat\n\nFound {len(pinned)} accessible chats. Pinned chats are shown first.\nSelected: 0",
+        f"Select SOURCE chat\n\nFound {len(pinned)} accessible chats. Pinned chats are shown first, then recent chats.\nMaximum 10 chats are shown.\nSelected: 0",
         reply_markup=InlineKeyboardMarkup(buttons),
     )
 
@@ -294,7 +338,7 @@ async def handle_forwarded_channel(update: Update, context: ContextTypes.DEFAULT
         dialogs = await fetch_all_dialogs(uid)
         allowed_targets = {key for key, _ in filter_dialogs(dialogs, "target")}
         if channel_key not in allowed_targets:
-            await msg.reply_text("Target must be a channel or group where your logged-in account is admin.")
+            await msg.reply_text("Target must be a channel or group where your logged-in account can post text and media.")
             return
     save_channel(uid, channel_key, chat.title or channel_key, role)
     key = f"{role}s"
@@ -345,11 +389,11 @@ async def mapping_flow_callback(update: Update, context: ContextTypes.DEFAULT_TY
         if role == "target":
             text = (
                 f"Select TARGET channel/group\n\nSelected sources: {_selected_channel_names(uid, context.user_data['sources'], 'source')}\n"
-                f"Found {len(pinned)} admin-managed target channels/groups. Pinned targets are shown first.\nSelected targets: {len(selected)}"
+                f"Found {len(pinned)} target channels/groups where you can post. Pinned targets are shown first, then recent targets.\nMaximum 10 targets are shown.\nSelected targets: {len(selected)}"
             )
         else:
             text = (
-                f"Select SOURCE chat\n\nFound {len(pinned)} accessible chats. Pinned chats are shown first.\nSelected: {len(selected)}"
+                f"Select SOURCE chat\n\nFound {len(pinned)} accessible chats. Pinned chats are shown first, then recent chats.\nMaximum 10 chats are shown.\nSelected: {len(selected)}"
             )
         await q.message.edit_text(text, reply_markup=InlineKeyboardMarkup(buttons))
         return
@@ -385,7 +429,7 @@ async def mapping_flow_callback(update: Update, context: ContextTypes.DEFAULT_TY
         ])
         await q.message.edit_text(
             f"Select TARGET channel/group\n\nSelected sources: {_selected_channel_names(uid, context.user_data['sources'], 'source')}\n"
-            f"Found {len(pinned)} admin-managed target channels/groups. Pinned targets are shown first.\nSelected targets: 0",
+            f"Found {len(pinned)} target channels/groups where you can post. Pinned targets are shown first, then recent targets.\nMaximum 10 targets are shown.\nSelected targets: 0",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
         return
@@ -466,7 +510,7 @@ async def cmd_add_mapping(update: Update, context: ContextTypes.DEFAULT_TYPE):
         dialogs = await fetch_all_dialogs(uid)
         allowed_targets = {key for key, _ in filter_dialogs(dialogs, "target")}
         if target not in allowed_targets:
-            await update.message.reply_text("Target must be a channel or group where your logged-in account is admin.")
+            await update.message.reply_text("Target must be a channel or group where your logged-in account can post text and media.")
             return
         before = fetchone(
             "SELECT 1 FROM mappings WHERE user_id=? AND source_channel=? AND target_channel=?",
@@ -581,7 +625,7 @@ async def _show_existing_channel_picker(update_or_query, uid: int, role: str, ac
     rows = await _pinned_or_saved_channels(uid, role) if action in ("add_source", "add_target") else _distinct_channels(uid, role)
     if not rows:
         if action in ("add_source", "add_target"):
-            message = "No accessible source chats found." if role == "source" else "No admin-managed target channels/groups found."
+            message = "No accessible source chats found." if role == "source" else "No target channels/groups found where your account can post."
         else:
             message = "No mapped sources found." if role == "source" else "No mapped targets found."
         if hasattr(update_or_query, "message"):
@@ -652,7 +696,7 @@ async def mapping_manage_callback(update: Update, context: ContextTypes.DEFAULT_
         buttons = build_buttons("source", [], pinned, [])
         buttons.append([InlineKeyboardButton("Done", callback_data="map_source_done"), InlineKeyboardButton("Cancel", callback_data="map_cancel")])
         await q.message.reply_text(
-            f"Select new source chat for:\n{_channel_display(uid, target_key, 'target')}\n\nPinned chats are shown first.",
+            f"Select new source chat for:\n{_channel_display(uid, target_key, 'target')}\n\nPinned chats are shown first, then recent chats. Maximum 10 chats are shown.",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
         return
@@ -670,7 +714,7 @@ async def mapping_manage_callback(update: Update, context: ContextTypes.DEFAULT_
         buttons = build_buttons("target", [], pinned, [])
         buttons.append([InlineKeyboardButton("Done", callback_data="map_target_done"), InlineKeyboardButton("Cancel", callback_data="map_cancel")])
         await q.message.reply_text(
-            f"Select new target channel/group for:\n{_channel_display(uid, source_key, 'source')}\n\nOnly channels/groups where your logged-in account is admin are shown. Pinned targets appear first.",
+            f"Select new target channel/group for:\n{_channel_display(uid, source_key, 'source')}\n\nOnly channels/groups where your account can post text and media are shown. Pinned targets appear first, then recent targets. Maximum 10 targets are shown.",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
         return

@@ -80,7 +80,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             "1. Log in your Telegram account with /login\n"
             "2. Tap Add Mapping from the menu\n"
             "3. Pick a source chat. Pinned chats appear first\n"
-            "4. Pick a target channel/group where you are admin\n"
+            "4. Pick a target channel/group where you can post\n"
             "5. Confirm the mapping\n\n"
             "Notes:\n"
             "- You can add multiple source channels\n"
