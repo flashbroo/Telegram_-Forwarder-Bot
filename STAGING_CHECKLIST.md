@@ -42,7 +42,7 @@ FORCE_SUB_MESSAGE=Join required channels to use this bot
 Run:
 
 ```powershell
-python bot.py
+python main.py
 ```
 
 Confirm:

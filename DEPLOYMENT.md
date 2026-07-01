@@ -127,7 +127,7 @@ RAZORPAY_WEBHOOK_SECRET=
 **Manual Test**
 
 ```bash
-sudo -u telegrambot bash -lc 'cd /opt/telegram-forwarder-bot && source .venv/bin/activate && python bot.py'
+sudo -u telegrambot bash -lc 'cd /opt/telegram-forwarder-bot && source .venv/bin/activate && python main.py'
 ```
 
 Check:

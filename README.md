@@ -27,7 +27,7 @@ Telegram forwarding bot with:
 
 ## Main Files
 
-- [bot.py](/D:/PROJECT-IMPORTANT/AUTOMATED_FORWARDED_BOT/bot.py)
+- [main.py](/D:/PROJECT-IMPORTANT/AUTOMATED_FORWARDED_BOT/main.py)
 - [mappings.py](/D:/PROJECT-IMPORTANT/AUTOMATED_FORWARDED_BOT/mappings.py)
 - [forwarder.py](/D:/PROJECT-IMPORTANT/AUTOMATED_FORWARDED_BOT/forwarder.py)
 - [subscriptions.py](/D:/PROJECT-IMPORTANT/AUTOMATED_FORWARDED_BOT/subscriptions.py)
@@ -41,7 +41,7 @@ Telegram forwarding bot with:
 1. Copy [.env.example](/D:/PROJECT-IMPORTANT/AUTOMATED_FORWARDED_BOT/.env.example) to `.env`
 2. Fill Telegram credentials
 3. Install dependencies from `requirements.txt`
-4. Run `python bot.py`
+4. Run `python main.py`
 5. Test `/health`, `/login`, one mapping, and one real forward
 
 ## Payments
@@ -60,3 +60,11 @@ Later:
 Use:
 - [DEPLOYMENT.md](/D:/PROJECT-IMPORTANT/AUTOMATED_FORWARDED_BOT/DEPLOYMENT.md) for server setup
 - [PRODUCTION_CHECKLIST.md](/D:/PROJECT-IMPORTANT/AUTOMATED_FORWARDED_BOT/PRODUCTION_CHECKLIST.md) before launch
+
+For Railway, deploy the bot as a worker with `python main.py`. Do not use
+`uvicorn main:app`; `main.py` is not an ASGI application. If Razorpay webhooks
+are enabled, create a separate Railway service with:
+
+```bash
+uvicorn razorpay_webhook:app --host 0.0.0.0 --port $PORT
+```
