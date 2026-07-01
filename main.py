@@ -1,8 +1,10 @@
 # bot.py
 import logging
 import asyncio
+import os
 from telegram.error import Forbidden
 from telegram import Update, BotCommand, BotCommandScopeChat
+from telegram.request import HTTPXRequest
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -35,6 +37,15 @@ from db import cleanup_expired_subscriptions, migrate_target_channel_ids
 
 def clear_login_state(context):
     context.user_data.pop("login_step", None)
+
+
+def clear_broken_proxy_env():
+    # Local dead proxy values like 127.0.0.1:9 break Telegram startup.
+    bad_values = {"http://127.0.0.1:9", "https://127.0.0.1:9"}
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"):
+        value = (os.environ.get(key) or "").strip()
+        if value in bad_values:
+            os.environ.pop(key, None)
 
 
 async def forwarder_loop(app):
@@ -255,11 +266,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @track_user
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📘 *How to Use*\n\n"
+        "How to Use\n\n"
         "Guide:\nhttps://telegra.ph/How-to-Use-Auto-Forwarder-Bot-User-Guide-01-22\n\n"
         "Contact admin:\nhttps://t.me/flash_bro\n\n"
-        "Use /menu to continue",
-        parse_mode="Markdown"
+        "Use /menu to continue"
     )
 
 
@@ -594,9 +604,23 @@ def main():
     cleanup_expired_subscriptions()
     migrate_target_channel_ids()
     asyncio.set_event_loop(asyncio.new_event_loop())
+    clear_broken_proxy_env()
 
-    
-    app = Application.builder().token(config.BOT_TOKEN).job_queue(None).build()
+    request = HTTPXRequest(
+        connection_pool_size=8,
+        connect_timeout=20.0,
+        read_timeout=20.0,
+        write_timeout=20.0,
+        pool_timeout=5.0,
+    )
+
+    app = (
+        Application.builder()
+        .token(config.BOT_TOKEN)
+        .request(request)
+        .job_queue(None)
+        .build()
+    )
 
     app.post_init = startup
     app.post_shutdown = shutdown
