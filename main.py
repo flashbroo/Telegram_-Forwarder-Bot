@@ -581,10 +581,24 @@ async def login_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("ℹ️ Use /login first.")
 
 async def startup(app):
-    await set_commands(app)
-    await restore_logged_in_clients()
+    logger.info("Telegram API connected; starting bot services")
+    try:
+        await set_commands(app)
+    except Exception:
+        # A stale admin/chat ID must not prevent the bot from receiving updates.
+        logger.exception("Could not configure Telegram command menus")
+
+    app.create_task(restore_clients_safely())
     app.create_task(forwarder_loop(app))
     app.create_task(subscription_reminder_loop(app))
+    logger.info("Polling startup completed; bot is ready for updates")
+
+
+async def restore_clients_safely():
+    try:
+        await restore_logged_in_clients()
+    except Exception:
+        logger.exception("Userbot session restoration failed")
 
 
 async def shutdown(app):
@@ -714,8 +728,8 @@ def main():
         )
     )
     app.add_error_handler(on_error)
-    print("🚀 Bot running…")
-    app.run_polling()
+    logger.info("Starting Telegram long polling")
+    app.run_polling(drop_pending_updates=False)
 
 
 if __name__ == "__main__":
