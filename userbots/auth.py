@@ -1,6 +1,7 @@
 
 import db
 import os
+import re
 import traceback
 from telethon.errors import (
     ApiIdInvalidError,
@@ -197,15 +198,12 @@ async def verify_otp(user_id: int, user_input: str):
     if len(user_input) < 3:
         return "INVALID_FORMAT"
 
-    if user_input.isdigit():
-        otp = user_input
-    else:
-        otp = user_input[:-3]
-        suffix = user_input[-3:]
-        if suffix.lower() != "abc":
-            return "INVALID_FORMAT"
+    match = re.fullmatch(r"(\d{3,8})([A-Za-z]*)", user_input)
+    if not match:
+        return "INVALID_FORMAT"
 
-    if not otp or not otp.isdigit():
+    otp = match.group(1)
+    if not otp:
         return "INVALID_FORMAT"
 
     try:

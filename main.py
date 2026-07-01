@@ -441,7 +441,7 @@ async def begin_login_with_phone(update: Update, context: ContextTypes.DEFAULT_T
     elif result == "OTP_SENT":
         context.user_data["login_step"] = "OTP"
         await update.message.reply_text(
-            "OTP sent.\n\nSend the OTP digits directly.\nYou can also still use the old format like:\n12345abc"
+            "OTP sent.\n\nSend the OTP digits directly. If Telegram shows letters after the code, you can send them together, like 12345abc."
         )
 
     elif result == "FLOOD":
@@ -557,7 +557,7 @@ async def login_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
         elif result == "OTP_SENT":   # ✅ FIXED
             context.user_data["login_step"] = "OTP"
             await update.message.reply_text(
-                "🔐 OTP sent.\n\nSend the OTP digits directly.\nYou can also still use the old format like:\n12345abc"
+                "🔐 OTP sent.\n\nSend the OTP digits directly. If Telegram shows letters after the code, you can send them together, like 12345abc."
             )
 
         elif result == "FLOOD":
@@ -616,7 +616,7 @@ async def login_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
             await update.message.reply_text("✅ Login successful!")
 
         elif result == "INVALID_FORMAT":
-            await update.message.reply_text("❌ Send the OTP digits directly, or use the old format like 12345abc")
+            await update.message.reply_text("Send the OTP digits directly, or include any letters shown after the code, like 12345abc.")
 
         elif result == "TOO_MANY_ATTEMPTS":
             clear_login_state(context)
