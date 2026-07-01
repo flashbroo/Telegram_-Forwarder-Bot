@@ -1,3 +1,5 @@
+import logging
+
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 from telethon.tl.functions.messages import GetPinnedDialogsRequest
@@ -6,8 +8,10 @@ from telethon.utils import get_peer_id
 import config
 import subscriptions
 from db import execute, fetchall, fetchone
-from userbots.manager import get_client
+from userbots.manager import ensure_client_started
 from utils import now_iso
+
+logger = logging.getLogger(__name__)
 
 
 def _has_mapping_access(user_id: int) -> bool:
@@ -15,14 +19,10 @@ def _has_mapping_access(user_id: int) -> bool:
 
 
 async def fetch_all_dialogs(uid):
-    client = get_client(uid)
-    if not client:
-        return []
-
     try:
-        if not client.is_connected():
-            await client.connect()
+        client = await ensure_client_started(uid)
         if not await client.is_user_authorized():
+            logger.warning("Cannot fetch dialogs for user %s because Telethon session is not authorized", uid)
             return []
 
         pinned_order = await fetch_pinned_dialog_order(client)
@@ -41,6 +41,7 @@ async def fetch_all_dialogs(uid):
             dialogs.append((str(chat.id), name, chat, is_pinned, pinned_order.get(peer_key, 10_000)))
         return sorted(dialogs, key=lambda item: (0 if item[3] else 1, item[4]))
     except Exception:
+        logger.exception("Failed to fetch dialogs for user %s", uid)
         return []
 
 
@@ -625,7 +626,11 @@ async def _show_existing_channel_picker(update_or_query, uid: int, role: str, ac
     rows = await _pinned_or_saved_channels(uid, role) if action in ("add_source", "add_target") else _distinct_channels(uid, role)
     if not rows:
         if action in ("add_source", "add_target"):
-            message = "No accessible source chats found." if role == "source" else "No target channels/groups found where your account can post."
+            message = (
+                "No accessible source chats found. Please make sure this Telegram account is logged in and has joined chats."
+                if role == "source"
+                else "No target channels/groups found where this Telegram account can post text and media."
+            )
         else:
             message = "No mapped sources found." if role == "source" else "No mapped targets found."
         if hasattr(update_or_query, "message"):
