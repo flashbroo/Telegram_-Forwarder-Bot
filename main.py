@@ -2,6 +2,7 @@
 import logging
 import asyncio
 import os
+import re
 from telegram.error import Forbidden
 from telegram import Update, BotCommand, BotCommandScopeChat
 from telegram.request import HTTPXRequest
@@ -412,6 +413,84 @@ async def guarded_remove_mapping(update, context):
 # -----------------------------
 # 🔥 FIX LOGIN COMMAND
 # -----------------------------
+PHONE_RE = re.compile(r"^\+[1-9]\d{7,14}$")
+
+
+def normalize_phone_number(text: str) -> str:
+    return re.sub(r"[\s\-()]", "", (text or "").strip())
+
+
+async def begin_login_with_phone(update: Update, context: ContextTypes.DEFAULT_TYPE, phone: str):
+    uid = update.effective_user.id
+    phone = normalize_phone_number(phone)
+
+    if not PHONE_RE.fullmatch(phone):
+        await update.message.reply_text(
+            "Invalid phone number format.\n\nUse international format like +918477887513 or +14155550123."
+        )
+        return
+
+    result = await start_login(uid, phone)
+
+    if result == "PHONE_ALREADY_REGISTERED":
+        await update.message.reply_text("Number already linked.")
+
+    elif result == "PHONE_IN_USE":
+        await update.message.reply_text("Number in use.")
+
+    elif result == "OTP_SENT":
+        context.user_data["login_step"] = "OTP"
+        await update.message.reply_text(
+            "OTP sent.\n\nSend the OTP digits directly.\nYou can also still use the old format like:\n12345abc"
+        )
+
+    elif result == "FLOOD":
+        await update.message.reply_text("Too many attempts.\nWait a few minutes.")
+
+    elif result == "PHONE_FLOOD":
+        await update.message.reply_text(
+            "Telegram is temporarily rate-limiting this phone number.\nPlease wait a while and try /login again."
+        )
+
+    elif result == "INVALID_PHONE":
+        await update.message.reply_text(
+            "Invalid phone number.\nUse international format like +918477887513 or +14155550123."
+        )
+
+    elif result == "PHONE_BANNED":
+        await update.message.reply_text(
+            "This phone number cannot be used for Telegram login.\nPlease use another Telegram account."
+        )
+
+    elif result == "USERBOT_CONFIG_MISSING":
+        await update.message.reply_text(
+            "Telegram login is not configured on this bot yet.\nAdmin must set USERBOT_API_ID and USERBOT_API_HASH in .env."
+        )
+
+    elif result == "API_ID_INVALID":
+        await update.message.reply_text(
+            "Telegram API credentials are invalid.\nAdmin should re-check USERBOT_API_ID and USERBOT_API_HASH."
+        )
+
+    elif result == "API_ID_PUBLISHED_FLOOD":
+        await update.message.reply_text(
+            "Telegram has limited this API key right now.\nAdmin should use a different Telegram API app or wait and try again later."
+        )
+
+    elif result == "AUTH_RESTART":
+        await update.message.reply_text(
+            "Telegram asked to restart the login process.\nPlease use /login again."
+        )
+
+    elif result == "CONNECT_ERROR":
+        await update.message.reply_text(
+            "Could not connect to Telegram for OTP delivery.\nPlease try again in a moment."
+        )
+
+    else:
+        await update.message.reply_text("Failed to send OTP.")
+
+
 async def cmd_login(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
 
@@ -420,6 +499,10 @@ async def cmd_login(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if await is_user_logged_in(uid):
         await update.message.reply_text("✅ Already logged in.")
+        return
+
+    if context.args:
+        await begin_login_with_phone(update, context, "".join(context.args))
         return
 
     context.user_data["login_step"] = "PHONE"
@@ -462,7 +545,8 @@ async def login_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
     step = context.user_data.get("login_step")
 
     if step == "PHONE":
-        result = await start_login(uid, text)
+        await begin_login_with_phone(update, context, text)
+        return
 
         if result == "PHONE_ALREADY_REGISTERED":
             await update.message.reply_text("❌ Number already linked.")
