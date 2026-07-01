@@ -1,5 +1,6 @@
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
+from telethon.tl.functions.messages import GetPinnedDialogsRequest
 from telethon.utils import get_peer_id
 
 import config
@@ -24,6 +25,8 @@ async def fetch_all_dialogs(uid):
         if not await client.is_user_authorized():
             return []
 
+        pinned_order = await fetch_pinned_dialog_order(client)
+        pinned_keys = set(pinned_order)
         dialogs = []
         async for dialog in client.iter_dialogs():
             chat = dialog.entity
@@ -33,10 +36,41 @@ async def fetch_all_dialogs(uid):
                 name = chat.first_name
             else:
                 name = "Unknown"
-            dialogs.append((str(chat.id), name, chat, bool(getattr(dialog, "pinned", False))))
-        return dialogs
+            peer_key = _peer_sort_key(chat)
+            is_pinned = peer_key in pinned_keys or bool(getattr(dialog, "pinned", False))
+            dialogs.append((str(chat.id), name, chat, is_pinned, pinned_order.get(peer_key, 10_000)))
+        return sorted(dialogs, key=lambda item: (0 if item[3] else 1, item[4]))
     except Exception:
         return []
+
+
+def _peer_sort_key(chat) -> str:
+    try:
+        return str(get_peer_id(chat))
+    except Exception:
+        return str(getattr(chat, "id", ""))
+
+
+def _dialog_peer_sort_key(peer) -> str:
+    try:
+        raw_peer = getattr(peer, "peer", peer)
+        return str(get_peer_id(raw_peer))
+    except Exception:
+        return ""
+
+
+async def fetch_pinned_dialog_order(client) -> dict[str, int]:
+    pinned = {}
+    try:
+        result = await client(GetPinnedDialogsRequest(folder_id=0))
+    except Exception:
+        return pinned
+
+    for index, dialog in enumerate(getattr(result, "dialogs", []) or []):
+        key = _dialog_peer_sort_key(dialog)
+        if key:
+            pinned.setdefault(key, index)
+    return pinned
 
 
 def _normalize_source_channel(value: str) -> str:
@@ -164,7 +198,7 @@ def filter_dialogs(dialogs, role):
     remaining = []
     seen = set()
 
-    for _, name, chat, is_pinned in dialogs:
+    for _, name, chat, is_pinned, *_ in dialogs:
         if role == "source" and not _is_accessible_source_chat(chat):
             continue
 
@@ -199,7 +233,7 @@ def build_buttons(role, selected_ids, pinned, saved):
 
 async def refresh_saved_channel_titles(uid):
     dialogs = await fetch_all_dialogs(uid)
-    for _, name, chat, _ in dialogs:
+    for _, name, chat, *_ in dialogs:
         source_key = _extract_channel_key(chat, "source")
         target_key = _extract_channel_key(chat, "target")
         if source_key:
