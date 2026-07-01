@@ -143,8 +143,8 @@ def _mapping_display(uid, row):
     return f"{_channel_display(uid, row['source_channel'], 'source')} -> {_channel_display(uid, row['target_channel'], 'target')}"
 
 
-def _can_send_to_target(chat) -> bool:
-    return bool(getattr(chat, "creator", False) or getattr(chat, "admin_rights", None))
+def _is_group_or_channel(chat) -> bool:
+    return chat.__class__.__name__.lower() in ("channel", "channelforbidden", "chat", "chatforbidden")
 
 
 def filter_dialogs(dialogs, role):
@@ -155,10 +155,7 @@ def filter_dialogs(dialogs, role):
         if not is_pinned:
             continue
 
-        chat_type = chat.__class__.__name__.lower()
-        if chat_type not in ("channel", "channelforbidden"):
-            continue
-        if role == "target" and not _can_send_to_target(chat):
+        if not _is_group_or_channel(chat):
             continue
 
         key = _extract_channel_key(chat, role)
@@ -221,7 +218,7 @@ async def cmd_add_mapping_flow(update: Update, context: ContextTypes.DEFAULT_TYP
     ])
 
     await message.reply_text(
-        f"Select SOURCE channels\n\nFound {len(pinned)} eligible pinned channels.\nOnly up to 10 pinned channels are shown.\nSelected: 0",
+        f"Select SOURCE channels/groups\n\nFound {len(pinned)} eligible pinned channels/groups.\nOnly up to 10 pinned channels/groups are shown.\nSelected: 0",
         reply_markup=InlineKeyboardMarkup(buttons),
     )
 
@@ -248,10 +245,6 @@ async def handle_forwarded_channel(update: Update, context: ContextTypes.DEFAULT
     if role == "source" and not getattr(chat, "username", None):
         await msg.reply_text("Source must be a public channel with a username.")
         return
-    if role == "target" and not _can_send_to_target(chat):
-        await msg.reply_text("You are not admin in that target channel or you cannot post there.")
-        return
-
     save_channel(uid, channel_key, chat.title or channel_key, role)
     key = f"{role}s"
     context.user_data.setdefault(key, [])
@@ -300,12 +293,12 @@ async def mapping_flow_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
         if role == "target":
             text = (
-                f"Select TARGET channels\n\nSelected sources: {_selected_channel_names(uid, context.user_data['sources'], 'source')}\n"
-                f"Found {len(pinned)} eligible pinned target channels where you can post.\nOnly up to 10 pinned channels are shown.\nSelected targets: {len(selected)}"
+                f"Select TARGET channels/groups\n\nSelected sources: {_selected_channel_names(uid, context.user_data['sources'], 'source')}\n"
+                f"Found {len(pinned)} eligible pinned target channels/groups.\nOnly up to 10 pinned channels/groups are shown.\nSelected targets: {len(selected)}"
             )
         else:
             text = (
-                f"Select SOURCE channels\n\nFound {len(pinned)} eligible pinned channels.\nOnly up to 10 pinned channels are shown.\nSelected: {len(selected)}"
+                f"Select SOURCE channels/groups\n\nFound {len(pinned)} eligible pinned channels/groups.\nOnly up to 10 pinned channels/groups are shown.\nSelected: {len(selected)}"
             )
         await q.message.edit_text(text, reply_markup=InlineKeyboardMarkup(buttons))
         return
@@ -340,8 +333,8 @@ async def mapping_flow_callback(update: Update, context: ContextTypes.DEFAULT_TY
             InlineKeyboardButton("Cancel", callback_data="map_cancel"),
         ])
         await q.message.edit_text(
-            f"Select TARGET channels\n\nSelected sources: {_selected_channel_names(uid, context.user_data['sources'], 'source')}\n"
-            f"Found {len(pinned)} eligible pinned target channels where you can post.\nOnly up to 10 pinned channels are shown.\nSelected targets: 0",
+            f"Select TARGET channels/groups\n\nSelected sources: {_selected_channel_names(uid, context.user_data['sources'], 'source')}\n"
+            f"Found {len(pinned)} eligible pinned target channels/groups.\nOnly up to 10 pinned channels/groups are shown.\nSelected targets: 0",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
         return
@@ -421,11 +414,6 @@ async def cmd_add_mapping(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target = _normalize_target_channel(context.args[1])
         if not source.startswith("@"): 
             await update.message.reply_text("Source must be a public channel username like @sourcechannel.")
-            return
-        dialogs = await fetch_all_dialogs(uid)
-        allowed_targets = {key for key, _ in filter_dialogs(dialogs, "target")}
-        if target not in allowed_targets:
-            await update.message.reply_text("You are not admin in that target channel or you do not have permission to send messages there.")
             return
         before = fetchone(
             "SELECT 1 FROM mappings WHERE user_id=? AND source_channel=? AND target_channel=?",
@@ -626,7 +614,7 @@ async def mapping_manage_callback(update: Update, context: ContextTypes.DEFAULT_
         buttons = build_buttons("source", [], pinned, [])
         buttons.append([InlineKeyboardButton("Done", callback_data="map_source_done"), InlineKeyboardButton("Cancel", callback_data="map_cancel")])
         await q.message.reply_text(
-            f"Select new source channels for:\n{_channel_display(uid, target_key, 'target')}\n\nOnly up to 10 pinned channels are shown.",
+            f"Select new source channels/groups for:\n{_channel_display(uid, target_key, 'target')}\n\nOnly up to 10 pinned channels/groups are shown.",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
         return
@@ -644,7 +632,7 @@ async def mapping_manage_callback(update: Update, context: ContextTypes.DEFAULT_
         buttons = build_buttons("target", [], pinned, [])
         buttons.append([InlineKeyboardButton("Done", callback_data="map_target_done"), InlineKeyboardButton("Cancel", callback_data="map_cancel")])
         await q.message.reply_text(
-            f"Select new target channels for:\n{_channel_display(uid, source_key, 'source')}\n\nOnly up to 10 pinned channels are shown.",
+            f"Select new target channels/groups for:\n{_channel_display(uid, source_key, 'source')}\n\nOnly up to 10 pinned channels/groups are shown.",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
         return

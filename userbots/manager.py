@@ -61,7 +61,7 @@ def _attach_channel_listener(user_id, client):
 
     @client.on(events.NewMessage)
     async def on_new_message(event):
-        if not event.is_channel:
+        if not (event.is_channel or event.is_group):
             return
 
         chat = await event.get_chat()
