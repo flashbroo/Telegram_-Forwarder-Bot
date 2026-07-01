@@ -15,6 +15,17 @@ Recommended OS:
 - keep `sessions/` on persistent disk
 - do not use ephemeral-storage hosting for the userbot session files
 
+**Railway Login Persistence**
+Telegram user logins are stored as Telethon session files. On Railway, attach a
+persistent volume and set:
+
+```bash
+SESSION_DIR=/data/sessions
+```
+
+Without a persistent `SESSION_DIR`, users may need to login again after every
+redeploy or service restart.
+
 **What To Upload**
 Upload only the project source and deployment files.
 

@@ -6,7 +6,7 @@ from telethon import TelegramClient, events
 from telethon.utils import get_peer_id
 
 import db
-from config import USERBOT_API_HASH, USERBOT_API_ID
+from config import SESSION_DIR, USERBOT_API_HASH, USERBOT_API_ID
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ async def drop_client(user_id):
 
 
 def get_session_paths(user_id):
-    session_base = os.path.join("sessions", str(user_id))
+    session_base = os.path.join(SESSION_DIR, str(user_id))
     return f"{session_base}.session", f"{session_base}.session-journal"
 
 
@@ -61,9 +61,6 @@ def _attach_channel_listener(user_id, client):
 
     @client.on(events.NewMessage)
     async def on_new_message(event):
-        if not (event.is_channel or event.is_group):
-            return
-
         chat = await event.get_chat()
         source_key = _normalize_source_key(getattr(chat, "username", None))
         source_id = str(get_peer_id(chat))
@@ -102,8 +99,8 @@ def create_client(user_id):
     if existing:
         return existing
 
-    os.makedirs("sessions", exist_ok=True)
-    session_name = os.path.join("sessions", str(user_id))
+    os.makedirs(SESSION_DIR, exist_ok=True)
+    session_name = os.path.join(SESSION_DIR, str(user_id))
     client = TelegramClient(session_name, USERBOT_API_ID, USERBOT_API_HASH)
     _attach_channel_listener(user_id, client)
     clients[user_id] = client

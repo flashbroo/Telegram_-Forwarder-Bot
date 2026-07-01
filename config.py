@@ -57,6 +57,7 @@ RAZORPAY_BASE_URL = os.getenv("RAZORPAY_BASE_URL", "https://api.razorpay.com").s
 
 DB_PATH = os.getenv("DB_PATH", "bot.db").strip()
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+SESSION_DIR = os.getenv("SESSION_DIR", "sessions").strip() or "sessions"
 
 # --------------------
 # LOGGING

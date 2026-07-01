@@ -68,3 +68,9 @@ are enabled, create a separate Railway service with:
 ```bash
 uvicorn razorpay_webhook:app --host 0.0.0.0 --port $PORT
 ```
+
+To keep users logged in on Railway, attach a persistent volume and set:
+
+```bash
+SESSION_DIR=/data/sessions
+```

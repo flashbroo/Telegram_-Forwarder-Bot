@@ -13,7 +13,7 @@ from telethon.errors import (
     PhoneNumberFloodError,
     PhoneNumberInvalidError
 )
-from userbots.manager import create_client, get_client, drop_client
+from userbots.manager import create_client, get_client, drop_client, get_session_paths
 from config import USERBOT_API_HASH, USERBOT_API_ID
 
 login_states = {}
@@ -43,8 +43,7 @@ async def _cleanup_login_state(user_id: int, state=None, keep_session_file: bool
     if keep_session_file:
         return
 
-    session_file = f"sessions/{user_id}.session"
-    session_journal = f"sessions/{user_id}.session-journal"
+    session_file, session_journal = get_session_paths(user_id)
 
     try:
         if os.path.exists(session_file):
@@ -78,8 +77,7 @@ async def start_login(user_id: int, phone: str):
     await drop_client(user_id)
 
     # 🔥 DELETE SESSION FILES (SAFE)
-    session_file = f"sessions/{user_id}.session"
-    session_journal = f"sessions/{user_id}.session-journal"
+    session_file, session_journal = get_session_paths(user_id)
 
     try:
         if os.path.exists(session_file):
@@ -289,8 +287,7 @@ async def logout(user_id: int):
         except:
             pass
 
-    session_file = f"sessions/{user_id}.session"
-    session_journal = f"sessions/{user_id}.session-journal"
+    session_file, session_journal = get_session_paths(user_id)
 
     try:
         if os.path.exists(session_file):
