@@ -113,6 +113,7 @@ async def set_commands(app):
         BotCommand("remove_mapping", "Remove mapping"),
         BotCommand("remove_source", "Remove source"),
         BotCommand("remove_target", "Remove target"),
+        BotCommand("debug_chats", "Debug chat picker"),
     ]
 
     # -----------------------------
@@ -760,6 +761,7 @@ def main():
     app.add_handler(CommandHandler("remove_mapping", guarded_remove_mapping))
     app.add_handler(CommandHandler("remove_source", guarded_remove_source))
     app.add_handler(CommandHandler("remove_target", guarded_remove_target))
+    app.add_handler(CommandHandler("debug_chats", mappings.cmd_debug_chats))
        # USER
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", menu))

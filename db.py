@@ -239,6 +239,21 @@ def init_db():
                 )
                 """,
                 """
+                CREATE TABLE IF NOT EXISTS pinned_dialogs (
+                    user_id BIGINT,
+                    dialog_id TEXT,
+                    peer_id TEXT,
+                    dialog_type TEXT,
+                    title TEXT,
+                    username TEXT,
+                    is_pinned INTEGER DEFAULT 1,
+                    can_post INTEGER DEFAULT 0,
+                    display_order INTEGER DEFAULT 0,
+                    last_sync TEXT,
+                    PRIMARY KEY (user_id, dialog_id)
+                )
+                """,
+                """
                 CREATE TABLE IF NOT EXISTS userbots (
                     userbot_id BIGINT PRIMARY KEY,
                     name TEXT,
@@ -421,21 +436,36 @@ def init_db():
                 created_at TEXT
             )
             """,
-            """
-            CREATE TABLE IF NOT EXISTS pinned_chats (
-                chat_id TEXT PRIMARY KEY,
-                title TEXT,
-                username TEXT,
+                """
+                CREATE TABLE IF NOT EXISTS pinned_chats (
+                    chat_id TEXT PRIMARY KEY,
+                    title TEXT,
+                    username TEXT,
                 chat_type TEXT,
                 is_pinned INTEGER DEFAULT 1,
-                updated_at TEXT
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS userbots (
-                userbot_id INTEGER PRIMARY KEY,
-                name TEXT,
-                active INTEGER DEFAULT 1,
+                    updated_at TEXT
+                )
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS pinned_dialogs (
+                    user_id INTEGER,
+                    dialog_id TEXT,
+                    peer_id TEXT,
+                    dialog_type TEXT,
+                    title TEXT,
+                    username TEXT,
+                    is_pinned INTEGER DEFAULT 1,
+                    can_post INTEGER DEFAULT 0,
+                    display_order INTEGER DEFAULT 0,
+                    last_sync TEXT,
+                    PRIMARY KEY (user_id, dialog_id)
+                )
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS userbots (
+                    userbot_id INTEGER PRIMARY KEY,
+                    name TEXT,
+                    active INTEGER DEFAULT 1,
                 created_at TEXT
             )
             """,
@@ -662,6 +692,73 @@ def get_logged_in_user_ids():
         """
     )
     return [row["user_id"] for row in rows]
+
+
+def replace_pinned_dialogs(user_id: int, dialogs: list[dict]):
+    execute("DELETE FROM pinned_dialogs WHERE user_id=?", (user_id,))
+
+    if IS_POSTGRES:
+        query = """
+            INSERT INTO pinned_dialogs
+            (user_id, dialog_id, peer_id, dialog_type, title, username, is_pinned, can_post, display_order, last_sync)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (user_id, dialog_id)
+            DO UPDATE SET
+                peer_id=EXCLUDED.peer_id,
+                dialog_type=EXCLUDED.dialog_type,
+                title=EXCLUDED.title,
+                username=EXCLUDED.username,
+                is_pinned=EXCLUDED.is_pinned,
+                can_post=EXCLUDED.can_post,
+                display_order=EXCLUDED.display_order,
+                last_sync=EXCLUDED.last_sync
+        """
+    else:
+        query = """
+            INSERT OR REPLACE INTO pinned_dialogs
+            (user_id, dialog_id, peer_id, dialog_type, title, username, is_pinned, can_post, display_order, last_sync)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+
+    for dialog in dialogs:
+        execute(
+            query,
+            (
+                user_id,
+                dialog["dialog_id"],
+                dialog["peer_id"],
+                dialog["dialog_type"],
+                dialog["title"],
+                dialog["username"],
+                1 if dialog.get("is_pinned") else 0,
+                1 if dialog.get("can_post") else 0,
+                dialog["display_order"],
+                dialog["last_sync"],
+            ),
+        )
+
+
+def get_pinned_dialogs(user_id: int, role: str = "source"):
+    if role == "target":
+        return fetchall(
+            """
+            SELECT *
+            FROM pinned_dialogs
+            WHERE user_id=? AND is_pinned=1 AND can_post=1 AND dialog_type IN ('channel', 'group', 'supergroup')
+            ORDER BY display_order ASC
+            """,
+            (user_id,),
+        )
+
+    return fetchall(
+        """
+        SELECT *
+        FROM pinned_dialogs
+        WHERE user_id=? AND is_pinned=1
+        ORDER BY display_order ASC
+        """,
+        (user_id,),
+    )
 
 
 def add_incoming_message(mapping_id: int, source_channel: str, message_id: int, payload: str):

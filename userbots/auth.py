@@ -14,6 +14,7 @@ from telethon.errors import (
     PhoneNumberInvalidError
 )
 from userbots.manager import create_client, get_client, drop_client, get_session_paths
+from userbots.pinned_dialog_sync import pinned_dialog_sync
 from config import USERBOT_API_HASH, USERBOT_API_ID
 
 login_states = {}
@@ -212,6 +213,7 @@ async def verify_otp(user_id: int, user_input: str):
         )
 
         db.assign_phone(phone, user_id)
+        await pinned_dialog_sync.sync_user(user_id, client, reason="login")
 
         active_logins.pop(phone, None)
         login_states.pop(user_id, None)
@@ -247,7 +249,9 @@ async def verify_2fa_password(user_id: int, password: str):
     try:
         await client.sign_in(password=password)
         db.assign_phone(phone, user_id)
-        await _cleanup_login_state(user_id, state, keep_session_file=True)
+        await pinned_dialog_sync.sync_user(user_id, client, reason="login_2fa")
+        active_logins.pop(phone, None)
+        login_states.pop(user_id, None)
         return "LOGGED_IN"
     except Exception:
         print("====== 2FA ERROR ======")

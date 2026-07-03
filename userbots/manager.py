@@ -7,6 +7,7 @@ from telethon.utils import get_peer_id
 
 import db
 from config import SESSION_DIR, USERBOT_API_HASH, USERBOT_API_ID
+from userbots.pinned_dialog_sync import pinned_dialog_sync
 
 logger = logging.getLogger(__name__)
 
@@ -103,14 +104,22 @@ def create_client(user_id):
     session_name = os.path.join(SESSION_DIR, str(user_id))
     client = TelegramClient(session_name, USERBOT_API_ID, USERBOT_API_HASH)
     _attach_channel_listener(user_id, client)
+    pinned_dialog_sync.attach(user_id, client)
     clients[user_id] = client
     return client
 
 
 async def ensure_client_started(user_id):
     client = get_client(user_id) or create_client(user_id)
+    was_connected = client.is_connected()
     if not client.is_connected():
         await client.connect()
+    if not was_connected:
+        try:
+            if await client.is_user_authorized():
+                pinned_dialog_sync.schedule_sync(user_id, client, reason="reconnect")
+        except Exception:
+            logger.exception("Failed to schedule pinned dialog sync after reconnect for user %s", user_id)
     return client
 
 
@@ -123,6 +132,7 @@ async def restore_logged_in_clients():
         try:
             client = await ensure_client_started(user_id)
             if await client.is_user_authorized():
+                await pinned_dialog_sync.sync_user(user_id, client, reason="restore")
                 logger.info("Restored userbot session for user %s", user_id)
             else:
                 logger.warning("Session for user %s is not authorized anymore", user_id)
