@@ -1,5 +1,6 @@
 import sqlite3
 import threading
+import logging
 from datetime import datetime
 
 import psycopg2
@@ -8,6 +9,7 @@ from psycopg2.extras import RealDictCursor
 from config import DATABASE_URL, DB_PATH
 
 IS_POSTGRES = bool(DATABASE_URL)
+logger = logging.getLogger(__name__)
 
 
 class RowAdapter(dict):
@@ -810,6 +812,24 @@ def replace_pinned_dialogs(user_id: int, dialogs: list[dict], sync_version: int 
     with _lock:
         try:
             delete_query = _translate_query("DELETE FROM pinned_dialogs WHERE user_id=?") if IS_POSTGRES else "DELETE FROM pinned_dialogs WHERE user_id=?"
+            before_query = (
+                _translate_query("SELECT dialog_id, title FROM pinned_dialogs WHERE user_id=? ORDER BY display_order ASC")
+                if IS_POSTGRES
+                else "SELECT dialog_id, title FROM pinned_dialogs WHERE user_id=? ORDER BY display_order ASC"
+            )
+            _cur.execute(before_query, (user_id,))
+            before_rows = _cur.fetchall()
+            before_ids = [row["dialog_id"] for row in before_rows]
+
+            logger.info(
+                "Pinned dialog DB update start: user_id=%s before_count=%s before_ids=%s incoming_count=%s incoming_ids=%s",
+                user_id,
+                len(before_rows),
+                before_ids,
+                len(dialogs),
+                [dialog["dialog_id"] for dialog in dialogs],
+            )
+
             _cur.execute(delete_query, (user_id,))
             for dialog in dialogs:
                 _cur.execute(
@@ -828,6 +848,15 @@ def replace_pinned_dialogs(user_id: int, dialogs: list[dict], sync_version: int 
                     ),
                 )
             _cur.execute(state_query, (user_id, now_iso(), sync_version))
+            _cur.execute(before_query, (user_id,))
+            after_rows = _cur.fetchall()
+            logger.info(
+                "Pinned dialog DB update success: user_id=%s after_count=%s after_ids=%s sync_version=%s",
+                user_id,
+                len(after_rows),
+                [row["dialog_id"] for row in after_rows],
+                sync_version,
+            )
             _conn.commit()
             return len(dialogs)
         except Exception:

@@ -106,8 +106,10 @@ class PinnedDialogSyncService:
         return any(isinstance(item, PIN_UPDATE_TYPES) for item in updates or [])
 
     async def _collect_pinned_dialogs(self, client):
-        pinned_order = await self._fetch_pinned_order(client)
+        pinned_snapshot = await self._fetch_pinned_snapshot(client)
+        pinned_order = {item["dialog_id"]: item["display_order"] for item in pinned_snapshot}
         pinned_keys = set(pinned_order)
+        dialog_entities = {}
         rows = []
         sync_ts = now_iso()
         dialog_count = 0
@@ -117,29 +119,46 @@ class PinnedDialogSyncService:
             dialog_count += 1
             chat = dialog.entity
             dialog_id = self._peer_key(chat)
-            is_pinned = dialog_id in pinned_keys or bool(getattr(dialog, "pinned", False))
-            if not is_pinned:
-                continue
-
-            can_post = self._can_post(chat)
-            if can_post:
-                target_count += 1
-
-            rows.append(
+            dialog_entities.setdefault(
+                dialog_id,
                 {
-                    "dialog_id": dialog_id,
-                    "peer_id": dialog_id,
-                    "dialog_type": self._dialog_type(chat),
-                    "title": self._title(chat),
-                    "username": getattr(chat, "username", None) or "",
-                    "is_pinned": True,
-                    "can_post": can_post,
-                    "display_order": pinned_order.get(dialog_id, 10_000 + len(rows)),
-                    "last_sync": sync_ts,
-                }
+                    "entity": chat,
+                    "is_pinned": bool(getattr(dialog, "pinned", False)),
+                },
             )
 
+        for item in pinned_snapshot:
+            dialog_entry = dialog_entities.get(item["dialog_id"]) or {}
+            chat = item.get("entity") or dialog_entry.get("entity")
+            if chat is None:
+                continue
+
+            row = self._build_dialog_row(chat, item["dialog_id"], item["display_order"], sync_ts)
+            if row["can_post"]:
+                target_count += 1
+            rows.append(row)
+
+        # Fallback: if Telegram returns pinned flags in the full dialog list but
+        # the pinned snapshot missed an item, keep it instead of hiding it.
+        for dialog_id, dialog_entry in dialog_entities.items():
+            if dialog_id in pinned_keys:
+                continue
+            is_pinned = dialog_entry["is_pinned"]
+            if not is_pinned:
+                continue
+            chat = dialog_entry["entity"]
+            row = self._build_dialog_row(chat, dialog_id, 10_000 + len(rows), sync_ts)
+            if row["can_post"]:
+                target_count += 1
+            rows.append(row)
+
         rows.sort(key=lambda row: row["display_order"])
+        logger.info(
+            "Telegram pinned snapshot: count=%s ids=%s titles=%s",
+            len(rows),
+            [row["dialog_id"] for row in rows],
+            [row["title"] for row in rows],
+        )
         stats = {
             "dialog_count": dialog_count,
             "pinned_count": len(rows),
@@ -147,6 +166,76 @@ class PinnedDialogSyncService:
             "target_count": target_count,
         }
         return rows, stats
+
+    def _build_dialog_row(self, chat, dialog_id: str, display_order: int, sync_ts: str) -> dict:
+        return {
+            "dialog_id": dialog_id,
+            "peer_id": dialog_id,
+            "dialog_type": self._dialog_type(chat),
+            "title": self._title(chat),
+            "username": getattr(chat, "username", None) or "",
+            "is_pinned": True,
+            "can_post": self._can_post(chat),
+            "display_order": display_order,
+            "last_sync": sync_ts,
+        }
+
+    async def _fetch_pinned_snapshot(self, client):
+        result = None
+        try:
+            result = await client(GetPinnedDialogsRequest(folder_id=0))
+        except Exception:
+            logger.exception("Failed to fetch pinned dialog snapshot")
+            return []
+
+        users_by_id = {getattr(user, "id", None): user for user in getattr(result, "users", []) or []}
+        chats_by_id = {getattr(chat, "id", None): chat for chat in getattr(result, "chats", []) or []}
+        snapshot = []
+
+        for index, dialog in enumerate(getattr(result, "dialogs", []) or []):
+            peer = getattr(dialog, "peer", dialog)
+            key = self._dialog_peer_key(dialog)
+            if not key:
+                continue
+
+            entity = self._entity_for_peer(peer, users_by_id, chats_by_id)
+            if entity is None:
+                try:
+                    entity = await client.get_entity(peer)
+                except Exception:
+                    logger.exception("Could not resolve pinned dialog entity for peer %s", key)
+                    continue
+
+            snapshot.append(
+                {
+                    "dialog_id": key,
+                    "display_order": index,
+                    "entity": entity,
+                }
+            )
+
+        logger.info(
+            "Fresh GetPinnedDialogs result: count=%s ids=%s titles=%s",
+            len(snapshot),
+            [item["dialog_id"] for item in snapshot],
+            [self._title(item["entity"]) for item in snapshot],
+        )
+        return snapshot
+
+    def _entity_for_peer(self, peer, users_by_id: dict, chats_by_id: dict):
+        user_id = getattr(peer, "user_id", None)
+        if user_id is not None:
+            return users_by_id.get(user_id)
+
+        chat_id = getattr(peer, "chat_id", None)
+        if chat_id is not None:
+            return chats_by_id.get(chat_id)
+
+        channel_id = getattr(peer, "channel_id", None)
+        if channel_id is not None:
+            return chats_by_id.get(channel_id)
+
+        return None
 
     def _validate_dialogs(self, dialogs):
         if dialogs is None:
@@ -161,20 +250,6 @@ class PinnedDialogSyncService:
             seen.add(dialog_id)
             if "display_order" not in dialog:
                 raise ValueError(f"Synced dialog {dialog_id} is missing display_order")
-
-    async def _fetch_pinned_order(self, client):
-        order = {}
-        try:
-            result = await client(GetPinnedDialogsRequest(folder_id=0))
-        except Exception:
-            logger.exception("Failed to fetch pinned dialog order")
-            return order
-
-        for index, dialog in enumerate(getattr(result, "dialogs", []) or []):
-            key = self._dialog_peer_key(dialog)
-            if key:
-                order.setdefault(key, index)
-        return order
 
     def _peer_key(self, chat) -> str:
         try:

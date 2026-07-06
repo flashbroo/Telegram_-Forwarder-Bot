@@ -22,6 +22,7 @@ from userbots.manager import (
     ensure_client_started,
     has_persisted_session,
     periodic_pinned_dialog_recovery_loop,
+    schedule_pinned_dialog_sync_for_user,
 )
 
 from force_subscribe import is_joined, join_keyboard, get_force_message
@@ -505,7 +506,8 @@ async def cmd_login(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clear_login_state(context)
 
     if await is_user_logged_in(uid):
-        await update.message.reply_text("✅ Already logged in.")
+        await schedule_pinned_dialog_sync_for_user(uid, reason="login_already_authorized")
+        await update.message.reply_text("Already logged in. I refreshed your synced pinned chats in the background.")
         return
 
     if context.args:

@@ -1,4 +1,5 @@
 import asyncio
+import logging
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
@@ -9,6 +10,8 @@ import subscriptions
 from db import execute, fetchall, fetchone, get_dialog_sync_state, get_pinned_dialogs
 from utils import now_iso
 from userbots.manager import schedule_pinned_dialog_sync_for_user
+
+logger = logging.getLogger(__name__)
 
 
 def _has_mapping_access(user_id: int) -> bool:
@@ -113,6 +116,14 @@ def _mapping_display(uid, row):
 
 def synced_dialog_rows(uid: int, role: str):
     rows = get_pinned_dialogs(uid, role)
+    logger.info(
+        "Pinned dialog UI query: user_id=%s role=%s count=%s ids=%s titles=%s",
+        uid,
+        role,
+        len(rows),
+        [row["dialog_id"] for row in rows],
+        [row["title"] for row in rows],
+    )
     return [(row["dialog_id"], row["title"] or row["dialog_id"]) for row in rows]
 
 
@@ -127,18 +138,27 @@ async def ready_synced_dialog_rows(uid: int, role: str):
     state = get_dialog_sync_state(uid)
     if not state:
         trigger_dialog_resync(uid, reason=f"{role}_missing_state")
+        logger.info("Pinned dialog UI blocked: user_id=%s role=%s sync_state=NOT_STARTED", uid, role)
         return None, "Your Telegram chats are syncing now. Please try again in a few seconds."
 
     sync_state = state["sync_state"]
     if sync_state == "SYNCING":
+        logger.info("Pinned dialog UI blocked: user_id=%s role=%s sync_state=SYNCING", uid, role)
         return None, "Your Telegram chats are still syncing. Please try again in a few seconds."
 
     if sync_state == "FAILED":
         trigger_dialog_resync(uid, reason=f"{role}_failed_retry")
+        logger.info(
+            "Pinned dialog UI blocked: user_id=%s role=%s sync_state=FAILED error=%s",
+            uid,
+            role,
+            state["error_text"],
+        )
         return None, "Chat sync failed earlier, so I started a fresh sync. Please try again shortly."
 
     if sync_state != "READY":
         trigger_dialog_resync(uid, reason=f"{role}_unknown_state")
+        logger.info("Pinned dialog UI blocked: user_id=%s role=%s sync_state=%s", uid, role, sync_state)
         return None, "Chat sync is being refreshed. Please try again in a few seconds."
 
     return synced_dialog_rows(uid, role), ""
