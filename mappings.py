@@ -13,6 +13,8 @@ from userbots.manager import schedule_pinned_dialog_sync_for_user
 
 logger = logging.getLogger(__name__)
 
+PINNED_DIALOG_UI_LIMIT = 15
+
 
 def _has_mapping_access(user_id: int) -> bool:
     return config.is_admin(user_id) or subscriptions.is_user_allowed(user_id)
@@ -115,11 +117,12 @@ def _mapping_display(uid, row):
 
 
 def synced_dialog_rows(uid: int, role: str):
-    rows = get_pinned_dialogs(uid, role)
+    rows = get_pinned_dialogs(uid, role, limit=PINNED_DIALOG_UI_LIMIT)
     logger.info(
-        "Pinned dialog UI query: user_id=%s role=%s count=%s ids=%s titles=%s",
+        "Pinned dialogs sent to UI: user_id=%s role=%s limit=%s count=%s ids=%s titles=%s",
         uid,
         role,
+        PINNED_DIALOG_UI_LIMIT,
         len(rows),
         [row["dialog_id"] for row in rows],
         [row["title"] for row in rows],
@@ -205,6 +208,14 @@ def build_buttons(role, selected_ids, pinned, saved):
         seen.add(cid)
         prefix = "[x]" if cid in selected_ids else "[ ]"
         buttons.append([InlineKeyboardButton(f"{prefix} {title}"[:60], callback_data=f"pick_{role}_{cid}")])
+    logger.info(
+        "Pinned dialogs rendered: role=%s pinned_input=%s saved_input=%s rendered_buttons=%s ids=%s",
+        role,
+        len(pinned),
+        len(saved),
+        len(buttons),
+        [cid for cid, _ in pinned],
+    )
     return buttons
 
 

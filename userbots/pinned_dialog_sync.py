@@ -4,13 +4,15 @@ import time
 
 from telethon import events
 from telethon.tl import types
-from telethon.tl.functions.messages import GetPinnedDialogsRequest
+from telethon.tl.functions.messages import GetDialogFiltersRequest, GetPinnedDialogsRequest
 from telethon.utils import get_peer_id
 
 import db
 from utils import now_iso
 
 logger = logging.getLogger(__name__)
+
+MAX_PINNED_DIALOGS = 15
 
 
 PIN_UPDATE_TYPES = (
@@ -47,6 +49,13 @@ class PinnedDialogSyncService:
                 dialogs, stats = await self._collect_pinned_dialogs(client)
                 self._validate_dialogs(dialogs)
                 written = db.replace_pinned_dialogs(user_id, dialogs, sync_version=sync_version)
+                logger.info(
+                    "Pinned dialogs written to database: user_id=%s detected=%s written=%s ids=%s",
+                    user_id,
+                    len(dialogs),
+                    written,
+                    [dialog["dialog_id"] for dialog in dialogs],
+                )
                 duration = time.perf_counter() - started
                 logger.info(
                     "Dialog sync ready for user %s (%s): telegram_dialogs=%s pinned=%s sources=%s targets=%s db_written=%s duration=%.2fs",
@@ -107,7 +116,17 @@ class PinnedDialogSyncService:
 
     async def _collect_pinned_dialogs(self, client):
         pinned_snapshot = await self._fetch_pinned_snapshot(client)
+        if len(pinned_snapshot) > MAX_PINNED_DIALOGS:
+            logger.info(
+                "Pinned dialog detection capped to UI limit: detected=%s cap=%s kept_ids=%s dropped_ids=%s",
+                len(pinned_snapshot),
+                MAX_PINNED_DIALOGS,
+                [item["dialog_id"] for item in pinned_snapshot[:MAX_PINNED_DIALOGS]],
+                [item["dialog_id"] for item in pinned_snapshot[MAX_PINNED_DIALOGS:]],
+            )
+            pinned_snapshot = pinned_snapshot[:MAX_PINNED_DIALOGS]
         pinned_order = {item["dialog_id"]: item["display_order"] for item in pinned_snapshot}
+        pinned_sources = {item["dialog_id"]: item.get("source", "unknown") for item in pinned_snapshot}
         pinned_keys = set(pinned_order)
         dialog_entities = {}
         iter_pinned_ids = []
@@ -139,8 +158,15 @@ class PinnedDialogSyncService:
                 iter_pinned,
                 self._dialog_flags(dialog),
                 classified_pinned,
-                "GetPinnedDialogs" if classified_pinned else "not_pinned",
+                pinned_sources.get(dialog_id, "not_pinned"),
             )
+
+        logger.info(
+            "Pinned dialog Telegram fetch counts: total_dialogs=%s detected_pinned=%s detected_ids=%s",
+            dialog_count,
+            len(pinned_snapshot),
+            [item["dialog_id"] for item in pinned_snapshot],
+        )
 
         for item in pinned_snapshot:
             dialog_entry = dialog_entities.get(item["dialog_id"]) or {}
@@ -174,10 +200,11 @@ class PinnedDialogSyncService:
 
         rows.sort(key=lambda row: row["display_order"])
         logger.info(
-            "Application detected pinned dialogs from GetPinnedDialogs only: count=%s ids=%s titles=%s",
+            "Application detected pinned dialogs from fresh Telegram data: count=%s ids=%s titles=%s sources=%s",
             len(rows),
             [row["dialog_id"] for row in rows],
             [row["title"] for row in rows],
+            [pinned_sources.get(row["dialog_id"]) for row in rows],
         )
         stats = {
             "dialog_count": dialog_count,
@@ -229,11 +256,35 @@ class PinnedDialogSyncService:
         return flags
 
     async def _fetch_pinned_snapshot(self, client):
+        default_snapshot = await self._fetch_pinned_snapshot_for_folder(client, folder_id=0, order_offset=0)
+        folder_snapshot = await self._fetch_dialog_filter_pinned_snapshot(client, order_offset=len(default_snapshot))
+
+        snapshot = []
+        seen = set()
+        for item in default_snapshot + folder_snapshot:
+            dialog_id = item["dialog_id"]
+            if dialog_id in seen:
+                continue
+            seen.add(dialog_id)
+            item["display_order"] = len(snapshot)
+            snapshot.append(item)
+
+        logger.info(
+            "Pinned dialog extraction summary: default_folder_count=%s folder_filter_count=%s unique_detected=%s ids=%s titles=%s",
+            len(default_snapshot),
+            len(folder_snapshot),
+            len(snapshot),
+            [item["dialog_id"] for item in snapshot],
+            [self._title(item["entity"]) for item in snapshot],
+        )
+        return snapshot
+
+    async def _fetch_pinned_snapshot_for_folder(self, client, folder_id: int, order_offset: int = 0):
         result = None
         try:
-            result = await client(GetPinnedDialogsRequest(folder_id=0))
+            result = await client(GetPinnedDialogsRequest(folder_id=folder_id))
         except Exception:
-            logger.exception("Failed to fetch pinned dialog snapshot")
+            logger.exception("Failed to fetch pinned dialog snapshot for folder_id=%s", folder_id)
             return []
 
         users_by_id = {getattr(user, "id", None): user for user in getattr(result, "users", []) or []}
@@ -257,18 +308,70 @@ class PinnedDialogSyncService:
             snapshot.append(
                 {
                     "dialog_id": key,
-                    "display_order": index,
+                    "display_order": order_offset + index,
                     "entity": entity,
+                    "source": f"GetPinnedDialogs(folder_id={folder_id})",
                 }
             )
 
         logger.info(
-            "Fresh GetPinnedDialogs result: count=%s ids=%s titles=%s",
+            "Fresh GetPinnedDialogs result: folder_id=%s count=%s ids=%s titles=%s",
+            folder_id,
             len(snapshot),
             [item["dialog_id"] for item in snapshot],
             [self._title(item["entity"]) for item in snapshot],
         )
         return snapshot
+
+    async def _fetch_dialog_filter_pinned_snapshot(self, client, order_offset: int = 0):
+        try:
+            result = await client(GetDialogFiltersRequest())
+        except Exception:
+            logger.exception("Failed to fetch Telegram dialog filters")
+            return []
+
+        snapshot = []
+        filters = getattr(result, "filters", []) or []
+        for dialog_filter in filters:
+            filter_id = getattr(dialog_filter, "id", None)
+            pinned_peers = getattr(dialog_filter, "pinned_peers", None) or []
+            logger.info(
+                "Telegram dialog filter pinned peers: filter_id=%s title=%s count=%s peer_keys=%s",
+                filter_id,
+                self._filter_title(dialog_filter),
+                len(pinned_peers),
+                [self._peer_key(peer) for peer in pinned_peers],
+            )
+            for peer in pinned_peers:
+                key = self._peer_key(peer)
+                if not key:
+                    continue
+                try:
+                    entity = await client.get_entity(peer)
+                except Exception:
+                    logger.exception("Could not resolve dialog filter pinned peer %s", key)
+                    continue
+                snapshot.append(
+                    {
+                        "dialog_id": key,
+                        "display_order": order_offset + len(snapshot),
+                        "entity": entity,
+                        "source": f"GetDialogFilters(filter_id={filter_id})",
+                    }
+                )
+
+        logger.info(
+            "Fresh GetDialogFilters pinned result: count=%s ids=%s titles=%s",
+            len(snapshot),
+            [item["dialog_id"] for item in snapshot],
+            [self._title(item["entity"]) for item in snapshot],
+        )
+        return snapshot
+
+    def _filter_title(self, dialog_filter) -> str:
+        title = getattr(dialog_filter, "title", None)
+        text = getattr(title, "text", None)
+        return text or str(title or "")
 
     def _entity_for_peer(self, peer, users_by_id: dict, chats_by_id: dict):
         user_id = getattr(peer, "user_id", None)

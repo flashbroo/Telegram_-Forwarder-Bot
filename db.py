@@ -866,7 +866,15 @@ def replace_pinned_dialogs(user_id: int, dialogs: list[dict], sync_version: int 
 
 def get_pinned_dialogs(user_id: int, role: str = "source", limit: int = 15):
     if role == "target":
-        return fetchall(
+        total_row = fetchone(
+            """
+            SELECT COUNT(*) AS c
+            FROM pinned_dialogs
+            WHERE user_id=? AND is_pinned=1 AND can_post=1 AND dialog_type IN ('channel', 'group', 'supergroup')
+            """,
+            (user_id,),
+        )
+        rows = fetchall(
             """
             SELECT *
             FROM pinned_dialogs
@@ -876,8 +884,26 @@ def get_pinned_dialogs(user_id: int, role: str = "source", limit: int = 15):
             """,
             (user_id, limit),
         )
+        logger.info(
+            "Pinned dialog repository return: user_id=%s role=%s total_matching=%s limit=%s returned=%s ids=%s",
+            user_id,
+            role,
+            total_row["c"] if total_row else 0,
+            limit,
+            len(rows),
+            [row["dialog_id"] for row in rows],
+        )
+        return rows
 
-    return fetchall(
+    total_row = fetchone(
+        """
+        SELECT COUNT(*) AS c
+        FROM pinned_dialogs
+        WHERE user_id=? AND is_pinned=1
+        """,
+        (user_id,),
+    )
+    rows = fetchall(
         """
         SELECT *
         FROM pinned_dialogs
@@ -887,6 +913,16 @@ def get_pinned_dialogs(user_id: int, role: str = "source", limit: int = 15):
         """,
         (user_id, limit),
     )
+    logger.info(
+        "Pinned dialog repository return: user_id=%s role=%s total_matching=%s limit=%s returned=%s ids=%s",
+        user_id,
+        role,
+        total_row["c"] if total_row else 0,
+        limit,
+        len(rows),
+        [row["dialog_id"] for row in rows],
+    )
+    return rows
 
 
 def add_incoming_message(mapping_id: int, source_channel: str, message_id: int, payload: str):
