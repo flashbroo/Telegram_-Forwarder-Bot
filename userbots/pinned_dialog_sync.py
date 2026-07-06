@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 
 from telethon import events
 from telethon.tl import types
@@ -29,18 +30,38 @@ class PinnedDialogSyncService:
     async def sync_user(self, user_id: int, client, reason: str = "manual"):
         lock = self._locks.setdefault(user_id, asyncio.Lock())
         async with lock:
+            started = time.perf_counter()
+            sync_version = int(time.time() * 1000)
             try:
+                logger.info("Dialog sync started for user %s (%s)", user_id, reason)
+                db.set_dialog_sync_state(user_id, "SYNCING", sync_version=sync_version)
+
                 if not client.is_connected():
                     await client.connect()
                 if not await client.is_user_authorized():
-                    logger.warning("Skipping pinned dialog sync for user %s: session is not authorized", user_id)
+                    message = "session is not authorized"
+                    db.set_dialog_sync_state(user_id, "FAILED", sync_version=sync_version, error_text=message)
+                    logger.warning("Dialog sync failed for user %s: %s", user_id, message)
                     return
 
-                dialogs = await self._collect_pinned_dialogs(client)
-                db.replace_pinned_dialogs(user_id, dialogs)
-                logger.info("Synced %s pinned dialogs for user %s (%s)", len(dialogs), user_id, reason)
-            except Exception:
-                logger.exception("Pinned dialog sync failed for user %s (%s)", user_id, reason)
+                dialogs, stats = await self._collect_pinned_dialogs(client)
+                self._validate_dialogs(dialogs)
+                written = db.replace_pinned_dialogs(user_id, dialogs, sync_version=sync_version)
+                duration = time.perf_counter() - started
+                logger.info(
+                    "Dialog sync ready for user %s (%s): telegram_dialogs=%s pinned=%s sources=%s targets=%s db_written=%s duration=%.2fs",
+                    user_id,
+                    reason,
+                    stats["dialog_count"],
+                    stats["pinned_count"],
+                    stats["source_count"],
+                    stats["target_count"],
+                    written,
+                    duration,
+                )
+            except Exception as exc:
+                db.set_dialog_sync_state(user_id, "FAILED", sync_version=sync_version, error_text=str(exc))
+                logger.exception("Dialog sync failed for user %s (%s)", user_id, reason)
 
     def attach(self, user_id: int, client):
         if getattr(client, "_pinned_dialog_sync_attached", False):
@@ -67,6 +88,17 @@ class PinnedDialogSyncService:
 
         self._pending_tasks[user_id] = asyncio.create_task(delayed_sync())
 
+    async def periodic_recovery_loop(self, client_provider, interval_seconds: int = 900):
+        while True:
+            await asyncio.sleep(interval_seconds)
+            for user_id, client in list(client_provider().items()):
+                try:
+                    if client and client.is_connected() and await client.is_user_authorized():
+                        logger.info("Dialog recovery sync scheduled for user %s", user_id)
+                        self.schedule_sync(user_id, client, reason="periodic_recovery")
+                except Exception:
+                    logger.exception("Dialog recovery sync scheduling failed for user %s", user_id)
+
     def _is_pin_update(self, update) -> bool:
         if isinstance(update, PIN_UPDATE_TYPES):
             return True
@@ -78,13 +110,20 @@ class PinnedDialogSyncService:
         pinned_keys = set(pinned_order)
         rows = []
         sync_ts = now_iso()
+        dialog_count = 0
+        target_count = 0
 
         async for dialog in client.iter_dialogs(ignore_pinned=False):
+            dialog_count += 1
             chat = dialog.entity
             dialog_id = self._peer_key(chat)
             is_pinned = dialog_id in pinned_keys or bool(getattr(dialog, "pinned", False))
             if not is_pinned:
                 continue
+
+            can_post = self._can_post(chat)
+            if can_post:
+                target_count += 1
 
             rows.append(
                 {
@@ -94,14 +133,34 @@ class PinnedDialogSyncService:
                     "title": self._title(chat),
                     "username": getattr(chat, "username", None) or "",
                     "is_pinned": True,
-                    "can_post": self._can_post(chat),
+                    "can_post": can_post,
                     "display_order": pinned_order.get(dialog_id, 10_000 + len(rows)),
                     "last_sync": sync_ts,
                 }
             )
 
         rows.sort(key=lambda row: row["display_order"])
-        return rows
+        stats = {
+            "dialog_count": dialog_count,
+            "pinned_count": len(rows),
+            "source_count": len(rows),
+            "target_count": target_count,
+        }
+        return rows, stats
+
+    def _validate_dialogs(self, dialogs):
+        if dialogs is None:
+            raise ValueError("Telegram dialog sync returned no result")
+        seen = set()
+        for index, dialog in enumerate(dialogs):
+            dialog_id = dialog.get("dialog_id")
+            if not dialog_id:
+                raise ValueError(f"Synced dialog at index {index} is missing dialog_id")
+            if dialog_id in seen:
+                raise ValueError(f"Duplicate synced dialog_id {dialog_id}")
+            seen.add(dialog_id)
+            if "display_order" not in dialog:
+                raise ValueError(f"Synced dialog {dialog_id} is missing display_order")
 
     async def _fetch_pinned_order(self, client):
         order = {}

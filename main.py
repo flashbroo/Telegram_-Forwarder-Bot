@@ -16,7 +16,13 @@ from telegram.ext import (
 )
 from telegram.error import BadRequest
 from userbots.auth import start_login, verify_otp, verify_2fa_password, logout
-from userbots.manager import restore_logged_in_clients, disconnect_all_clients, ensure_client_started, has_persisted_session
+from userbots.manager import (
+    restore_logged_in_clients,
+    disconnect_all_clients,
+    ensure_client_started,
+    has_persisted_session,
+    periodic_pinned_dialog_recovery_loop,
+)
 
 from force_subscribe import is_joined, join_keyboard, get_force_message
 
@@ -674,6 +680,7 @@ async def startup(app):
         logger.exception("Could not configure Telegram command menus")
 
     app.create_task(restore_clients_safely())
+    app.create_task(periodic_pinned_dialog_recovery_loop())
     app.create_task(forwarder_loop(app))
     app.create_task(subscription_reminder_loop(app))
     logger.info("Polling startup completed; bot is ready for updates")

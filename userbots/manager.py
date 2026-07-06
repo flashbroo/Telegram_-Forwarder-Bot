@@ -123,6 +123,20 @@ async def ensure_client_started(user_id):
     return client
 
 
+async def schedule_pinned_dialog_sync_for_user(user_id: int, reason: str = "ui_retry") -> bool:
+    try:
+        client = await ensure_client_started(user_id)
+        if not await client.is_user_authorized():
+            db.set_dialog_sync_state(user_id, "FAILED", error_text="session is not authorized")
+            return False
+        pinned_dialog_sync.schedule_sync(user_id, client, reason=reason)
+        return True
+    except Exception:
+        logger.exception("Failed to schedule pinned dialog sync for user %s", user_id)
+        db.set_dialog_sync_state(user_id, "FAILED", error_text="could not schedule sync")
+        return False
+
+
 async def restore_logged_in_clients():
     if not USERBOT_API_ID or not USERBOT_API_HASH:
         logger.warning("Userbot API credentials are missing; login and source monitoring are disabled.")
@@ -138,6 +152,10 @@ async def restore_logged_in_clients():
                 logger.warning("Session for user %s is not authorized anymore", user_id)
         except Exception:
             logger.exception("Failed to restore userbot session for user %s", user_id)
+
+
+async def periodic_pinned_dialog_recovery_loop(interval_seconds: int = 900):
+    await pinned_dialog_sync.periodic_recovery_loop(lambda: clients, interval_seconds=interval_seconds)
 
 
 async def disconnect_all_clients():

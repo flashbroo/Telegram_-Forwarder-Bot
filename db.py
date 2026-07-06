@@ -254,6 +254,15 @@ def init_db():
                 )
                 """,
                 """
+                CREATE TABLE IF NOT EXISTS dialog_sync_state (
+                    user_id BIGINT PRIMARY KEY,
+                    sync_state TEXT NOT NULL,
+                    last_sync_at TEXT,
+                    sync_version BIGINT DEFAULT 0,
+                    error_text TEXT
+                )
+                """,
+                """
                 CREATE TABLE IF NOT EXISTS userbots (
                     userbot_id BIGINT PRIMARY KEY,
                     name TEXT,
@@ -278,6 +287,8 @@ def init_db():
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_mappings_unique_pair ON mappings(user_id, source_channel, target_channel)",
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_incoming_unique_message ON incoming_messages(mapping_id, source_channel, message_id)",
                 "CREATE INDEX IF NOT EXISTS idx_incoming_status_id ON incoming_messages(status, id)",
+                "CREATE INDEX IF NOT EXISTS idx_pinned_dialogs_user_order ON pinned_dialogs(user_id, is_pinned, display_order)",
+                "CREATE INDEX IF NOT EXISTS idx_pinned_dialogs_user_target_order ON pinned_dialogs(user_id, can_post, display_order)",
             ]
             for statement in statements:
                 _cur.execute(statement)
@@ -462,6 +473,15 @@ def init_db():
                 )
                 """,
                 """
+                CREATE TABLE IF NOT EXISTS dialog_sync_state (
+                    user_id INTEGER PRIMARY KEY,
+                    sync_state TEXT NOT NULL,
+                    last_sync_at TEXT,
+                    sync_version INTEGER DEFAULT 0,
+                    error_text TEXT
+                )
+                """,
+                """
                 CREATE TABLE IF NOT EXISTS userbots (
                     userbot_id INTEGER PRIMARY KEY,
                     name TEXT,
@@ -486,6 +506,8 @@ def init_db():
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_mappings_unique_pair ON mappings(user_id, source_channel, target_channel)",
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_incoming_unique_message ON incoming_messages(mapping_id, source_channel, message_id)",
             "CREATE INDEX IF NOT EXISTS idx_incoming_status_id ON incoming_messages(status, id)",
+            "CREATE INDEX IF NOT EXISTS idx_pinned_dialogs_user_order ON pinned_dialogs(user_id, is_pinned, display_order)",
+            "CREATE INDEX IF NOT EXISTS idx_pinned_dialogs_user_target_order ON pinned_dialogs(user_id, can_post, display_order)",
         ]
         for statement in statements:
             _cur.execute(statement)
@@ -694,11 +716,60 @@ def get_logged_in_user_ids():
     return [row["user_id"] for row in rows]
 
 
-def replace_pinned_dialogs(user_id: int, dialogs: list[dict]):
-    execute("DELETE FROM pinned_dialogs WHERE user_id=?", (user_id,))
+def set_dialog_sync_state(user_id: int, sync_state: str, sync_version: int | None = None, error_text: str = ""):
+    timestamp = now_iso()
+    current = get_dialog_sync_state(user_id)
+    version = sync_version if sync_version is not None else ((current["sync_version"] if current else 0) + 1)
 
     if IS_POSTGRES:
-        query = """
+        execute(
+            """
+            INSERT INTO dialog_sync_state (user_id, sync_state, last_sync_at, sync_version, error_text)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT (user_id) DO UPDATE SET
+                sync_state=EXCLUDED.sync_state,
+                last_sync_at=EXCLUDED.last_sync_at,
+                sync_version=EXCLUDED.sync_version,
+                error_text=EXCLUDED.error_text
+            """,
+            (user_id, sync_state, timestamp, version, error_text[:1000]),
+        )
+        return
+
+    execute(
+        """
+        INSERT OR REPLACE INTO dialog_sync_state (user_id, sync_state, last_sync_at, sync_version, error_text)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (user_id, sync_state, timestamp, version, error_text[:1000]),
+    )
+
+
+def get_dialog_sync_state(user_id: int):
+    return fetchone(
+        """
+        SELECT user_id, sync_state, last_sync_at, sync_version, error_text
+        FROM dialog_sync_state
+        WHERE user_id=?
+        """,
+        (user_id,),
+    )
+
+
+def replace_pinned_dialogs(user_id: int, dialogs: list[dict], sync_version: int | None = None) -> int:
+    sync_version = sync_version if sync_version is not None else int(datetime.utcnow().timestamp() * 1000)
+
+    if dialogs is None:
+        raise ValueError("dialogs cannot be None")
+    for index, dialog in enumerate(dialogs):
+        if not dialog.get("dialog_id"):
+            raise ValueError(f"dialog at index {index} is missing dialog_id")
+        if "display_order" not in dialog:
+            raise ValueError(f"dialog at index {index} is missing display_order")
+
+    if IS_POSTGRES:
+        insert_query = _translate_query(
+            """
             INSERT INTO pinned_dialogs
             (user_id, dialog_id, peer_id, dialog_type, title, username, is_pinned, can_post, display_order, last_sync)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -712,33 +783,59 @@ def replace_pinned_dialogs(user_id: int, dialogs: list[dict]):
                 can_post=EXCLUDED.can_post,
                 display_order=EXCLUDED.display_order,
                 last_sync=EXCLUDED.last_sync
-        """
+            """
+        )
+        state_query = _translate_query(
+            """
+            INSERT INTO dialog_sync_state (user_id, sync_state, last_sync_at, sync_version, error_text)
+            VALUES (?, 'READY', ?, ?, '')
+            ON CONFLICT (user_id) DO UPDATE SET
+                sync_state=EXCLUDED.sync_state,
+                last_sync_at=EXCLUDED.last_sync_at,
+                sync_version=EXCLUDED.sync_version,
+                error_text=EXCLUDED.error_text
+            """
+        )
     else:
-        query = """
+        insert_query = """
             INSERT OR REPLACE INTO pinned_dialogs
             (user_id, dialog_id, peer_id, dialog_type, title, username, is_pinned, can_post, display_order, last_sync)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
+        state_query = """
+            INSERT OR REPLACE INTO dialog_sync_state (user_id, sync_state, last_sync_at, sync_version, error_text)
+            VALUES (?, 'READY', ?, ?, '')
+        """
 
-    for dialog in dialogs:
-        execute(
-            query,
-            (
-                user_id,
-                dialog["dialog_id"],
-                dialog["peer_id"],
-                dialog["dialog_type"],
-                dialog["title"],
-                dialog["username"],
-                1 if dialog.get("is_pinned") else 0,
-                1 if dialog.get("can_post") else 0,
-                dialog["display_order"],
-                dialog["last_sync"],
-            ),
-        )
+    with _lock:
+        try:
+            delete_query = _translate_query("DELETE FROM pinned_dialogs WHERE user_id=?") if IS_POSTGRES else "DELETE FROM pinned_dialogs WHERE user_id=?"
+            _cur.execute(delete_query, (user_id,))
+            for dialog in dialogs:
+                _cur.execute(
+                    insert_query,
+                    (
+                        user_id,
+                        dialog["dialog_id"],
+                        dialog.get("peer_id") or dialog["dialog_id"],
+                        dialog.get("dialog_type") or "unknown",
+                        dialog.get("title") or dialog["dialog_id"],
+                        dialog.get("username") or "",
+                        1 if dialog.get("is_pinned") else 0,
+                        1 if dialog.get("can_post") else 0,
+                        dialog["display_order"],
+                        dialog.get("last_sync") or now_iso(),
+                    ),
+                )
+            _cur.execute(state_query, (user_id, now_iso(), sync_version))
+            _conn.commit()
+            return len(dialogs)
+        except Exception:
+            _conn.rollback()
+            raise
 
 
-def get_pinned_dialogs(user_id: int, role: str = "source"):
+def get_pinned_dialogs(user_id: int, role: str = "source", limit: int = 15):
     if role == "target":
         return fetchall(
             """
@@ -746,8 +843,9 @@ def get_pinned_dialogs(user_id: int, role: str = "source"):
             FROM pinned_dialogs
             WHERE user_id=? AND is_pinned=1 AND can_post=1 AND dialog_type IN ('channel', 'group', 'supergroup')
             ORDER BY display_order ASC
+            LIMIT ?
             """,
-            (user_id,),
+            (user_id, limit),
         )
 
     return fetchall(
@@ -756,8 +854,9 @@ def get_pinned_dialogs(user_id: int, role: str = "source"):
         FROM pinned_dialogs
         WHERE user_id=? AND is_pinned=1
         ORDER BY display_order ASC
+        LIMIT ?
         """,
-        (user_id,),
+        (user_id, limit),
     )
 
 

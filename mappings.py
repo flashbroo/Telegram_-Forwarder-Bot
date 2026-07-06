@@ -1,11 +1,14 @@
+import asyncio
+
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 from telethon.utils import get_peer_id
 
 import config
 import subscriptions
-from db import execute, fetchall, fetchone, get_pinned_dialogs
+from db import execute, fetchall, fetchone, get_dialog_sync_state, get_pinned_dialogs
 from utils import now_iso
+from userbots.manager import schedule_pinned_dialog_sync_for_user
 
 
 def _has_mapping_access(user_id: int) -> bool:
@@ -113,8 +116,46 @@ def synced_dialog_rows(uid: int, role: str):
     return [(row["dialog_id"], row["title"] or row["dialog_id"]) for row in rows]
 
 
+def trigger_dialog_resync(uid: int, reason: str):
+    try:
+        asyncio.create_task(schedule_pinned_dialog_sync_for_user(uid, reason=reason))
+    except RuntimeError:
+        pass
+
+
+async def ready_synced_dialog_rows(uid: int, role: str):
+    state = get_dialog_sync_state(uid)
+    if not state:
+        trigger_dialog_resync(uid, reason=f"{role}_missing_state")
+        return None, "Your Telegram chats are syncing now. Please try again in a few seconds."
+
+    sync_state = state["sync_state"]
+    if sync_state == "SYNCING":
+        return None, "Your Telegram chats are still syncing. Please try again in a few seconds."
+
+    if sync_state == "FAILED":
+        trigger_dialog_resync(uid, reason=f"{role}_failed_retry")
+        return None, "Chat sync failed earlier, so I started a fresh sync. Please try again shortly."
+
+    if sync_state != "READY":
+        trigger_dialog_resync(uid, reason=f"{role}_unknown_state")
+        return None, "Chat sync is being refreshed. Please try again in a few seconds."
+
+    return synced_dialog_rows(uid, role), ""
+
+
+async def reply_sync_message(carrier, text: str):
+    if hasattr(carrier, "message") and carrier.message:
+        await carrier.message.reply_text(text)
+    elif hasattr(carrier, "edit_text"):
+        await carrier.edit_text(text)
+    else:
+        await carrier.reply_text(text)
+
+
 async def cmd_debug_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
+    state = get_dialog_sync_state(uid)
     source_rows = synced_dialog_rows(uid, "source")
     target_rows = synced_dialog_rows(uid, "target")
 
@@ -125,6 +166,8 @@ async def cmd_debug_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         "Chat diagnostic for your logged-in Telegram account:\n\n"
+        f"Sync state: {state['sync_state'] if state else 'NOT_STARTED'}\n"
+        f"Last sync: {state['last_sync_at'] if state else 'Never'}\n"
         f"Synced pinned dialogs: {len(source_rows)}\n"
         f"Source eligible shown: {len(source_rows)}\n"
         f"Target eligible shown: {len(target_rows)}\n\n"
@@ -158,7 +201,15 @@ async def cmd_add_mapping_flow(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data["sources"] = []
     context.user_data["targets"] = []
 
-    rows = synced_dialog_rows(uid, "source")
+    rows, sync_message = await ready_synced_dialog_rows(uid, "source")
+    if rows is None:
+        await message.reply_text(sync_message)
+        return
+
+    if not rows:
+        await message.reply_text("No pinned chats found for your logged-in Telegram account. Pin chats in Telegram, then try again after sync.")
+        return
+
     buttons = build_buttons("source", [], rows, [])
     buttons.append([
         InlineKeyboardButton("Done", callback_data="map_source_done"),
@@ -166,7 +217,7 @@ async def cmd_add_mapping_flow(update: Update, context: ContextTypes.DEFAULT_TYP
     ])
 
     await message.reply_text(
-        f"Select SOURCE pinned chat\n\nFound {len(rows)} synced pinned chats.\nSelected: 0",
+        f"Select SOURCE pinned chat\n\nFound {len(rows)} synced pinned chats. Up to 15 pinned chats are shown.\nSelected: 0",
         reply_markup=InlineKeyboardMarkup(buttons),
     )
 
@@ -191,7 +242,11 @@ async def handle_forwarded_channel(update: Update, context: ContextTypes.DEFAULT
     role = "source" if state == "COLLECT_SOURCES" else "target"
     channel_key = _extract_channel_key(chat, role)
     if role == "target":
-        allowed_targets = {key for key, _ in synced_dialog_rows(uid, "target")}
+        rows, sync_message = await ready_synced_dialog_rows(uid, "target")
+        if rows is None:
+            await msg.reply_text(sync_message)
+            return
+        allowed_targets = {key for key, _ in rows}
         if channel_key not in allowed_targets:
             await msg.reply_text("Target must be a channel or group where your logged-in account can post text and media.")
             return
@@ -233,7 +288,10 @@ async def mapping_flow_callback(update: Update, context: ContextTypes.DEFAULT_TY
         else:
             selected.append(cid)
 
-        rows = synced_dialog_rows(uid, role)
+        rows, sync_message = await ready_synced_dialog_rows(uid, role)
+        if rows is None:
+            await q.message.edit_text(sync_message)
+            return
         buttons = build_buttons(role, selected, rows, [])
         buttons.append([
             InlineKeyboardButton("Done", callback_data=f"map_{role}_done"),
@@ -247,7 +305,7 @@ async def mapping_flow_callback(update: Update, context: ContextTypes.DEFAULT_TY
             )
         else:
             text = (
-                f"Select SOURCE pinned chat\n\nFound {len(rows)} synced pinned chats.\nSelected: {len(selected)}"
+                f"Select SOURCE pinned chat\n\nFound {len(rows)} synced pinned chats. Up to 15 pinned chats are shown.\nSelected: {len(selected)}"
             )
         await q.message.edit_text(text, reply_markup=InlineKeyboardMarkup(buttons))
         return
@@ -275,7 +333,13 @@ async def mapping_flow_callback(update: Update, context: ContextTypes.DEFAULT_TY
             return
 
         context.user_data["map_state"] = "COLLECT_TARGETS"
-        rows = synced_dialog_rows(uid, "target")
+        rows, sync_message = await ready_synced_dialog_rows(uid, "target")
+        if rows is None:
+            await q.message.edit_text(sync_message)
+            return
+        if not rows:
+            await q.message.edit_text("No pinned target channels/groups found where your logged-in account can post text and media.")
+            return
         buttons = build_buttons("target", [], rows, [])
         buttons.append([
             InlineKeyboardButton("Done", callback_data="map_target_done"),
@@ -283,7 +347,7 @@ async def mapping_flow_callback(update: Update, context: ContextTypes.DEFAULT_TY
         ])
         await q.message.edit_text(
             f"Select TARGET channel/group\n\nSelected sources: {_selected_channel_names(uid, context.user_data['sources'], 'source')}\n"
-            f"Found {len(rows)} synced pinned targets where you can post.\nSelected targets: 0",
+            f"Found {len(rows)} synced pinned targets where you can post. Up to 15 pinned targets are shown.\nSelected targets: 0",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
         return
@@ -361,7 +425,11 @@ async def cmd_add_mapping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) == 2:
         source = _normalize_source_channel(context.args[0])
         target = _normalize_target_channel(context.args[1])
-        allowed_targets = {key for key, _ in synced_dialog_rows(uid, "target")}
+        rows, sync_message = await ready_synced_dialog_rows(uid, "target")
+        if rows is None:
+            await update.message.reply_text(sync_message)
+            return
+        allowed_targets = {key for key, _ in rows}
         if target not in allowed_targets:
             await update.message.reply_text("Target must be a channel or group where your logged-in account can post text and media.")
             return
@@ -455,11 +523,18 @@ def _distinct_channels(uid: int, role: str):
 
 
 async def _pinned_or_saved_channels(uid: int, role: str):
-    return synced_dialog_rows(uid, role)
+    rows, _ = await ready_synced_dialog_rows(uid, role)
+    return rows
 
 
 async def _show_existing_channel_picker(update_or_query, uid: int, role: str, action: str):
-    rows = await _pinned_or_saved_channels(uid, role) if action in ("add_source", "add_target") else _distinct_channels(uid, role)
+    if action in ("add_source", "add_target"):
+        rows, sync_message = await ready_synced_dialog_rows(uid, role)
+        if rows is None:
+            await reply_sync_message(update_or_query, sync_message)
+            return
+    else:
+        rows = _distinct_channels(uid, role)
     if not rows:
         if action in ("add_source", "add_target"):
             message = (
@@ -531,11 +606,14 @@ async def mapping_manage_callback(update: Update, context: ContextTypes.DEFAULT_
         context.user_data["manage_mode"] = "ADD_SOURCES_TO_TARGET"
         context.user_data["sources"] = []
         context.user_data["selected_target"] = target_key
-        rows = synced_dialog_rows(uid, "source")
+        rows, sync_message = await ready_synced_dialog_rows(uid, "source")
+        if rows is None:
+            await q.message.reply_text(sync_message)
+            return
         buttons = build_buttons("source", [], rows, [])
         buttons.append([InlineKeyboardButton("Done", callback_data="map_source_done"), InlineKeyboardButton("Cancel", callback_data="map_cancel")])
         await q.message.reply_text(
-            f"Select new source chat for:\n{_channel_display(uid, target_key, 'target')}\n\nPinned chats are shown first, then recent chats. Maximum 10 chats are shown.",
+            f"Select new source chat for:\n{_channel_display(uid, target_key, 'target')}\n\nUp to 15 synced pinned chats are shown.",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
         return
@@ -547,11 +625,14 @@ async def mapping_manage_callback(update: Update, context: ContextTypes.DEFAULT_
         context.user_data["manage_mode"] = "ADD_TARGETS_TO_SOURCE"
         context.user_data["targets"] = []
         context.user_data["selected_source"] = source_key
-        rows = synced_dialog_rows(uid, "target")
+        rows, sync_message = await ready_synced_dialog_rows(uid, "target")
+        if rows is None:
+            await q.message.reply_text(sync_message)
+            return
         buttons = build_buttons("target", [], rows, [])
         buttons.append([InlineKeyboardButton("Done", callback_data="map_target_done"), InlineKeyboardButton("Cancel", callback_data="map_cancel")])
         await q.message.reply_text(
-            f"Select new target channel/group for:\n{_channel_display(uid, source_key, 'source')}\n\nOnly channels/groups where your account can post text and media are shown. Pinned targets appear first, then recent targets. Maximum 10 targets are shown.",
+            f"Select new target channel/group for:\n{_channel_display(uid, source_key, 'source')}\n\nOnly pinned channels/groups where your account can post text and media are shown. Up to 15 targets are shown.",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
         return
