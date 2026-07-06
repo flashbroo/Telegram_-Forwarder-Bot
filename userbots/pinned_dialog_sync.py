@@ -110,6 +110,7 @@ class PinnedDialogSyncService:
         pinned_order = {item["dialog_id"]: item["display_order"] for item in pinned_snapshot}
         pinned_keys = set(pinned_order)
         dialog_entities = {}
+        iter_pinned_ids = []
         rows = []
         sync_ts = now_iso()
         dialog_count = 0
@@ -123,8 +124,22 @@ class PinnedDialogSyncService:
                 dialog_id,
                 {
                     "entity": chat,
-                    "is_pinned": bool(getattr(dialog, "pinned", False)),
+                    "is_pinned": self._dialog_pinned_flag(dialog),
                 },
+            )
+            iter_pinned = self._dialog_pinned_flag(dialog)
+            classified_pinned = dialog_id in pinned_keys
+            if iter_pinned:
+                iter_pinned_ids.append(dialog_id)
+            logger.info(
+                "Telethon dialog pin debug: id=%s title=%s type=%s pinned_flag=%r flags=%s classified_pinned=%s classification_source=%s",
+                dialog_id,
+                self._title(chat),
+                self._dialog_type(chat),
+                iter_pinned,
+                self._dialog_flags(dialog),
+                classified_pinned,
+                "GetPinnedDialogs" if classified_pinned else "not_pinned",
             )
 
         for item in pinned_snapshot:
@@ -138,23 +153,28 @@ class PinnedDialogSyncService:
                 target_count += 1
             rows.append(row)
 
-        # Fallback: if Telegram returns pinned flags in the full dialog list but
-        # the pinned snapshot missed an item, keep it instead of hiding it.
-        for dialog_id, dialog_entry in dialog_entities.items():
-            if dialog_id in pinned_keys:
-                continue
-            is_pinned = dialog_entry["is_pinned"]
-            if not is_pinned:
-                continue
-            chat = dialog_entry["entity"]
-            row = self._build_dialog_row(chat, dialog_id, 10_000 + len(rows), sync_ts)
-            if row["can_post"]:
-                target_count += 1
-            rows.append(row)
+        stale_iter_pins = sorted(set(iter_pinned_ids) - pinned_keys)
+        snapshot_missing_from_iter = sorted(pinned_keys - set(dialog_entities))
+        if stale_iter_pins:
+            stale_iter_titles = {
+                dialog_id: self._title(dialog_entities[dialog_id]["entity"])
+                for dialog_id in stale_iter_pins
+                if dialog_id in dialog_entities
+            }
+            logger.warning(
+                "Ignoring iter_dialogs pinned flags absent from GetPinnedDialogs: ids=%s titles=%s",
+                stale_iter_pins,
+                stale_iter_titles,
+            )
+        if snapshot_missing_from_iter:
+            logger.info(
+                "Pinned snapshot contains dialogs not present in iter_dialogs metadata: ids=%s",
+                snapshot_missing_from_iter,
+            )
 
         rows.sort(key=lambda row: row["display_order"])
         logger.info(
-            "Telegram pinned snapshot: count=%s ids=%s titles=%s",
+            "Application detected pinned dialogs from GetPinnedDialogs only: count=%s ids=%s titles=%s",
             len(rows),
             [row["dialog_id"] for row in rows],
             [row["title"] for row in rows],
@@ -179,6 +199,34 @@ class PinnedDialogSyncService:
             "display_order": display_order,
             "last_sync": sync_ts,
         }
+
+    def _dialog_pinned_flag(self, dialog):
+        return getattr(dialog, "pinned", None)
+
+    def _dialog_flags(self, dialog) -> dict:
+        raw_dialog = getattr(dialog, "dialog", None)
+        keys = (
+            "pinned",
+            "archived",
+            "folder_id",
+            "is_channel",
+            "is_group",
+            "is_user",
+            "unread_count",
+            "unread_mentions_count",
+        )
+        flags = {key: getattr(dialog, key, None) for key in keys}
+        raw_keys = (
+            "pinned",
+            "folder_id",
+            "unread_mark",
+            "unread_count",
+            "unread_mentions_count",
+            "pts",
+        )
+        flags["raw_dialog_class"] = raw_dialog.__class__.__name__ if raw_dialog is not None else None
+        flags["raw_dialog_flags"] = {key: getattr(raw_dialog, key, None) for key in raw_keys}
+        return flags
 
     async def _fetch_pinned_snapshot(self, client):
         result = None
