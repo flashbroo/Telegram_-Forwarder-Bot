@@ -263,7 +263,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         "🤖 *Auto Forwarder Bot*\n\n"
-        "Automatically forward messages between Telegram chats.\n\n"
+        "Automatically forward messages between Telegram chats. \n\n"
+        "It helps you to forward messages from any public channels to your own channels/Groups. \n\n"
         "📖 Use /menu to continue.",
         parse_mode="Markdown"
     )
