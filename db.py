@@ -949,11 +949,12 @@ def add_incoming_message(mapping_id: int, source_channel: str, message_id: int, 
 
 def migrate_target_channel_ids():
     rows = fetchall(
-        """
-        SELECT mapping_id, user_id, target_channel
-        FROM mappings
-        WHERE target_channel NOT LIKE '-%'
-        """
+    """
+    SELECT mapping_id, user_id, target_channel
+    FROM mappings
+    WHERE target_channel NOT LIKE ?
+    """,
+    ("-%",)
     )
 
     for row in rows:
